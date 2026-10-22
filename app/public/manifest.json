@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "小合·易联",
   "version": "1.4.3",
-  "description": "按租户和人员生成HS OpenAPI 访问链接",
+  "description": "按租户和人员生成 HS OpenAPI 访问链接",
   "permissions": ["storage"],
   "optional_host_permissions": ["https://*/*"],
   "icons": {

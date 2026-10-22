@@ -4,7 +4,7 @@
 
 ## 1. 形态
 
-- Chrome/Edge **Manifest V3** 扩展，**不依赖本地服务**，直接由浏览器调用HS OpenAPI。
+- Chrome/Edge **Manifest V3** 扩展，**不依赖本地服务**，直接由浏览器调用 HS OpenAPI。
 - 两个入口：`index.html`（设置页，`options_page`）与 `popup.html`（工具栏弹窗，`action.default_popup`）。
 - `manifest.json` 权限只有 `storage`；`optional_host_permissions` 为 `https://*/*`，**按租户 API 域名在运行时逐个申请**，不预先获取全量域名权限。
 - 源码在 `app/`，Vite 以两个 HTML 为入口构建到 `app/dist/client/`——**这是唯一可加载的扩展产物**，随仓库提交，CI 会校验它与源码一致。
