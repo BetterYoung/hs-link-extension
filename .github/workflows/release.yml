@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  # 合入 main 即发布（main 已开启分支保护：需 PR、他人审批与 CI 通过）
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "要发布的版本号（留空则取 manifest.json 中的版本）"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: 打包并发布
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: 读取并校验版本号
+        id: ver
+        run: |
+          version="${{ inputs.version }}"
+          if [ -z "$version" ]; then
+            version=$(node -p "require('./app/public/manifest.json').version")
+          fi
+          pkg=$(node -p "require('./app/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$version" != "$pkg" ]; then
+            echo "::error::manifest.json($version) 与 package.json($pkg) 版本号不一致，请同步后再合并。"
+            exit 1
+          fi
+
+      - name: 判断是否需要发版
+        id: check
+        run: |
+          version="${{ steps.ver.outputs.version }}"
+          if git rev-parse "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "标签 v$version 已存在，跳过发布。"
+            exit 0
+          fi
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+          if [ -n "$latest" ]; then
+            latest_ver="${latest#v}"
+            if [ "$(printf '%s\n%s\n' "$latest_ver" "$version" | sort -V | head -n 1)" != "$latest_ver" ]; then
+              echo "::error::版本号 $version 不大于已发布的 $latest_ver，拒绝回退发版。"
+              exit 1
+            fi
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+      - name: 测试与构建
+        if: steps.check.outputs.publish == 'true'
+        working-directory: app
+        run: |
+          npm install --package-lock-only
+          npm ci
+          npm test
+          npm run build
+
+      - name: 打包
+        if: steps.check.outputs.publish == 'true'
+        run: |
+          version="${{ steps.ver.outputs.version }}"
+          mkdir -p "release/hs-link-v$version"
+          cp -r app/dist/client/. "release/hs-link-v$version/"
+          cp README.md CHANGELOG.md "release/hs-link-v$version/"
+          (cd "release/hs-link-v$version" && zip -r "../hs-link-v$version.zip" .)
+
+      - name: 打标签并创建 Release
+        if: steps.check.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          gh release create "v$VERSION" "release/hs-link-v$VERSION.zip" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "v$VERSION" \
+            --notes-file CHANGELOG.md

@@ -1,0 +1,10 @@
+# 统一以 LF 换行，避免构建产物在不同系统上产生无意义差异
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.woff binary
+*.woff2 binary

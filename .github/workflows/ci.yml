@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: 测试与构建校验
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: 安装依赖
+        run: |
+          npm install --package-lock-only
+          npm ci
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 构建扩展
+        run: npm run build
+
+      - name: 校验构建产物与仓库一致
+        run: |
+          if [ -n "$(git status --porcelain -- dist/client)" ]; then
+            echo "::error::app/dist/client 与源码不一致，请执行 npm run build 后提交产物。"
+            git status --porcelain -- dist/client
+            exit 1
+          fi
+
+      - name: 校验版本号一致
+        run: |
+          version=$(node -p "require('./public/manifest.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$version" != "$pkg" ]; then
+            echo "::error::manifest.json($version) 与 package.json($pkg) 版本号不一致。"
+            exit 1
+          fi
+          echo "版本号一致：$version"
