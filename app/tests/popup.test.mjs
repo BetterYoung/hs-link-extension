@@ -23,12 +23,18 @@ test("popup has a dedicated entry and does not persist generated links", async (
   assert.doesNotMatch(source, /generatedUrl|accessToken/);
 });
 
-test("popup offers searchable tenant/person pickers and a batch person dialog", async () => {
+test("popup offers local name search and an online lookup without batch add", async () => {
   const source = await readFile(new URL("../src/PopupApp.jsx", import.meta.url), "utf8");
   assert.match(source, /tenant-picker/);
   assert.match(source, /person-picker/);
   assert.match(source, /搜索姓名/);
   assert.match(source, /搜索租户名称/);
-  assert.match(source, /批量新增/);
-  assert.match(source, /popup-batch-result/);
+  assert.match(source, /person-picker-query/);
+  assert.match(source, /person-lookup-dims/);
+  assert.match(source, /在线查询/);
+  assert.match(source, /LOOKUP_DIMENSIONS/);
+  assert.match(source, /mergeResolvedPerson/);
+  assert.match(source, /storage\??\.onChanged/);
+  assert.doesNotMatch(source, /批量新增/);
+  assert.doesNotMatch(source, /popup-batch/);
 });

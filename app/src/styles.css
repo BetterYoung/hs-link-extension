@@ -1059,3 +1059,137 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   font-size: 13px;
   text-align: center;
 }
+
+/* 导入（Excel） */
+.modal-wide {
+  width: min(100%, 860px);
+}
+
+.import-source-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 6px;
+  background: #eef2f7;
+}
+
+.import-source-tab {
+  flex: 1;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #5b6b82;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.import-source-tab.active {
+  background: #fff;
+  color: #14203c;
+  box-shadow: 0 1px 3px #14203c1f;
+}
+
+.import-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.import-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.import-file-name {
+  color: #5b6b82;
+  font-size: 13px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-summary,
+.import-progress {
+  margin: 0;
+  font-size: 14px;
+}
+
+.import-progress {
+  color: #2f6fd0;
+}
+
+.import-preview {
+  border: 1px solid #e1e7ee;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.import-preview-head,
+.import-preview-row {
+  display: flex;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.import-preview-head {
+  background: #f4f7fb;
+  color: #536278;
+  font-weight: 600;
+}
+
+.import-preview-body {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.import-preview-row + .import-preview-row {
+  border-top: 1px solid #eef2f7;
+}
+
+.import-preview-head span,
+.import-preview-row span {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-preview-head span:first-child,
+.import-preview-row span:first-child {
+  flex: 0 0 44px;
+}
+
+.import-preview-row span:last-child {
+  flex: 1.6 1 0;
+}
+
+.import-preview-row.tone-error {
+  background: #fff6f4;
+}
+
+.import-preview-row.tone-error span:last-child {
+  color: #9b3424;
+}
+
+.import-preview-row.tone-warn span:last-child {
+  color: #8a5b00;
+}
+
+.import-preview-row.tone-ok span:last-child {
+  color: #2f7d55;
+}
+
+.import-preview-row.tone-skip {
+  color: #8b98a9;
+}
+
+.global-result-summary {
+  max-height: 62vh;
+  overflow-y: auto;
+}
