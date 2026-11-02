@@ -4,11 +4,11 @@
 
 A Chrome/Edge Manifest V3 extension that generates HS OpenAPI access links per tenant and employee — **no local service required**.
 
-- **Toolbar popup** — pick a tenant and a person, then generate / copy / open the access link.
-- **Settings page** — manage tenants, personnel, batch onboarding and encrypted-free backups.
+- **Toolbar popup** — pick a tenant and a person, then generate / copy / open the access link. The person row also supports local name search and online lookup by personnel ID, code, phone or email.
+- **Settings page** — manage tenants, personnel, batch onboarding, Excel import and encrypted-free backups.
 - **No server** — the extension talks to the HS OpenAPI directly from the browser.
 
-Current version: **1.4.3** ([CHANGELOG.md](./CHANGELOG.md))
+Current version: **1.6.0** ([CHANGELOG.md](./CHANGELOG.md))
 
 [![CI](https://github.com/BetterYoung/hs-link-extension/actions/workflows/ci.yml/badge.svg)](https://github.com/BetterYoung/hs-link-extension/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
@@ -38,6 +38,7 @@ Download the ready-to-install package from the [Releases page](https://github.co
 3. SaaS deployments are pre-filled with the built-in service address; localized deployments use their own HTTPS origin.
 4. Save. The enterprise ID may be left blank — the extension fetches it from the authorization response.
 5. Tip: **从 cURL 导入** parses a pasted `getAccessToken` cURL command and fills in the address, `appKey` and `appSecurity`. Cookies and request headers are never stored.
+6. Excel import: **从 Excel 批量导入** accepts tenant name, origin, `appKey` and `appSecurity` (a blank origin uses the built-in SaaS address). It previews rows, authorizes each row to fill the enterprise ID, and merges existing tenants by enterprise ID. Max 100 rows per file; row 2 is an example row and is skipped automatically.
 
 ### 2. Personnel
 
@@ -45,10 +46,11 @@ Download the ready-to-install package from the [Releases page](https://github.co
 2. Add a person: fill in any of **personnel ID / code / phone / email**. The name may be left blank — it is filled from the matched employee.
 3. Missing fields are completed from the employee record, without overwriting values you maintain.
 4. Within one tenant, people are unique by personnel ID: saving an existing ID updates that record.
+5. Excel import: **从 Excel 导入** accepts name, personnel ID, code, phone and email; one person shares the same record ID across selected tenants. Every row is resolved against each selected tenant even when a name is present; a missing ID or an ID that conflicts with the lookup fails that tenant row. Max 100 rows per file; row 2 is an example row and is skipped automatically.
 
 ### 3. Generate a link
 
-1. Back in the popup, choose the tenant and the person (both pickers are searchable).
+1. Back in the popup, choose the tenant and the person. Both pickers are searchable; the person row's search button queries by personnel ID, code, phone or email — local records first, then the tenant API, saving the result locally and selecting it automatically.
 2. Click **生成链接**. The default is the Web homepage, valid for 7 days, and can be reused.
 3. Copy the link or open it in a new tab.
 
