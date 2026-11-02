@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Copy, ExternalLink, Link2, LoaderCircle, Settings } from "lucide-react";
-import { applyResolvedPerson, emptyWorkspace, loadWorkspace, normalizePerson, saveWorkspace } from "./model.js";
+import { Check, ChevronDown, Copy, ExternalLink, Link2, LoaderCircle, Search, Settings } from "lucide-react";
+import { applyResolvedPerson, emptyWorkspace, loadWorkspace, saveWorkspace, STORAGE_KEY } from "./model.js";
 import { authorizeTenant, generateAccessLink, PermissionRequiredError, requestOriginPermission, resolveStaff } from "./openapi.js";
+import {
+  findLocalMatches,
+  LOOKUP_DIMENSIONS,
+  lookupQueryPerson,
+  mergeResolvedPerson,
+  validateLookupValue,
+} from "./lookupPerson.js";
 
 const RULE_LABEL = "Web 首页 · 7 天 · 可重复访问";
-const blankBatchPerson = { name: "", staffId: "", code: "", phone: "", email: "" };
 
 /** 租户选择器：支持按名称搜索的下拉单选。 */
 function TenantPicker({ tenants, value, onChange, disabled }) {
@@ -47,21 +53,36 @@ function TenantPicker({ tenants, value, onChange, disabled }) {
   </div>;
 }
 
-/** 人员选择器：支持按姓名搜索、方向键移动与回车选择。 */
-function PersonPicker({ people, value, onChange, disabled }) {
+/** 查询面板维度：姓名只查本地，其余维度支持在线查询。 */
+const QUERY_DIMENSIONS = [
+  ...LOOKUP_DIMENSIONS,
+  { key: "name", label: "姓名", placeholder: "搜索本地姓名" },
+];
+
+/**
+ * 人员选择器：
+ * - 点击人员行打开本地姓名列表；
+ * - 点击右侧查询按钮直接进入按维度查询面板（人员 ID / 工号 / 手机号 / 邮箱 / 姓名）。
+ *   姓名只搜本地；其余维度本地优先，未命中调接口并直接保存、选中。
+ */
+function PersonPicker({ people, value, onChange, disabled, onLookup }) {
   const [open, setOpen] = useState(false);
+  const [view, setView] = useState("local");
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  const [dimension, setDimension] = useState("staffId");
+  const [lookupValue, setLookupValue] = useState("");
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupError, setLookupError] = useState("");
+  const [lookupChoices, setLookupChoices] = useState(null);
   const activeRef = useRef(0);
   const rootRef = useRef(null);
+  const lookupInputRef = useRef(null);
 
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event) => {
-      if (rootRef.current && !rootRef.current.contains(event.target)) {
-        setOpen(false);
-        setQuery("");
-      }
+      if (rootRef.current && !rootRef.current.contains(event.target)) close();
     };
     document.addEventListener("mousedown", onPointerDown);
     return () => document.removeEventListener("mousedown", onPointerDown);
@@ -72,16 +93,52 @@ function PersonPicker({ people, value, onChange, disabled }) {
     setActiveIndex(index);
   }
 
-  useEffect(() => { setActive(0); }, [query, open]);
+  useEffect(() => { setActive(0); }, [query, open, dimension, lookupValue]);
+
+  function resetPanel() {
+    setQuery("");
+    setView("local");
+    setDimension("staffId");
+    setLookupValue("");
+    setLookupBusy(false);
+    setLookupError("");
+    setLookupChoices(null);
+  }
+
+  function close() {
+    setOpen(false);
+    resetPanel();
+  }
+
+  function openLocal() {
+    if (open && view === "local") { close(); return; }
+    resetPanel();
+    setView("local");
+    setOpen(true);
+  }
+
+  function openLookup() {
+    if (open && view === "lookup") { close(); return; }
+    resetPanel();
+    setView("lookup");
+    setOpen(true);
+    setTimeout(() => lookupInputRef.current?.focus(), 0);
+  }
 
   const selected = (people || []).find((person) => person.id === value) || null;
   const term = query.trim().toLocaleLowerCase();
   const filtered = (people || []).filter((person) => !term || String(person.name || "").toLocaleLowerCase().includes(term));
-  const choose = (id) => {
+  const dimensionItem = QUERY_DIMENSIONS.find((item) => item.key === dimension) || QUERY_DIMENSIONS[0];
+  const isNameMode = dimension === "name";
+  const nameTerm = lookupValue.trim().toLocaleLowerCase();
+  const nameMatches = isNameMode
+    ? (people || []).filter((person) => !nameTerm || String(person.name || "").toLocaleLowerCase().includes(nameTerm))
+    : [];
+
+  function choose(id) {
     onChange(id);
-    setOpen(false);
-    setQuery("");
-  };
+    close();
+  }
 
   function onKeyDown(event) {
     if (event.key === "ArrowDown") {
@@ -96,73 +153,87 @@ function PersonPicker({ people, value, onChange, disabled }) {
       if (person) choose(person.id);
     } else if (event.key === "Escape") {
       event.preventDefault();
-      setOpen(false);
-      setQuery("");
+      close();
+    }
+  }
+
+  async function submitLookup() {
+    if (isNameMode) {
+      const person = nameMatches[activeRef.current] || nameMatches[0];
+      if (person) choose(person.id);
+      return;
+    }
+    if (lookupBusy) return;
+    setLookupError("");
+    setLookupChoices(null);
+    setLookupBusy(true);
+    try {
+      const outcome = await onLookup({ dimension, value: lookupValue });
+      if (outcome?.status === "choose") {
+        setLookupChoices(outcome.people);
+        return;
+      }
+      close();
+    } catch (error) {
+      setLookupError(error?.message || String(error));
+    } finally {
+      setLookupBusy(false);
+    }
+  }
+
+  function onLookupKeyDown(event) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submitLookup();
+    } else if (isNameMode && event.key === "ArrowDown") {
+      event.preventDefault();
+      setActive(Math.min(nameMatches.length - 1, activeRef.current + 1));
+    } else if (isNameMode && event.key === "ArrowUp") {
+      event.preventDefault();
+      setActive(Math.max(0, activeRef.current - 1));
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      close();
     }
   }
 
   return <div className="person-picker" ref={rootRef}>
-    <button type="button" className="person-picker-trigger" disabled={disabled} onClick={() => { setOpen(!open); setQuery(""); }} aria-haspopup="listbox" aria-expanded={open} title={selected ? selected.name : "请选择人员"}>
-      <span>{selected ? selected.name : "请选择人员"}</span><ChevronDown size={18} aria-hidden="true" />
-    </button>
+    <div className="person-picker-row">
+      <button type="button" className="person-picker-trigger" disabled={disabled} onClick={openLocal} aria-haspopup="listbox" aria-expanded={open && view === "local"} title={selected ? selected.name : "请选择人员"}>
+        <span>{selected ? selected.name : "请选择人员"}</span><ChevronDown size={18} aria-hidden="true" />
+      </button>
+      <button type="button" className="person-picker-query" disabled={disabled} onClick={openLookup} aria-expanded={open && view === "lookup"} title="按维度查询人员" aria-label="按维度查询人员"><Search size={18} /></button>
+    </div>
     {open && <div className="person-picker-panel">
-      <input className="person-picker-search" value={query} autoFocus placeholder="搜索姓名" onChange={(event) => setQuery(event.target.value)} onKeyDown={onKeyDown} aria-label="搜索人员" />
-      <div className="person-picker-list" role="listbox" aria-label="人员列表">
-        {filtered.map((person, index) => <button type="button" role="option" aria-selected={person.id === value} className={`person-picker-option${index === activeIndex ? " active" : ""}`} onMouseEnter={() => setActive(index)} onClick={() => choose(person.id)} key={person.id}>{person.name}</button>)}
-        {filtered.length === 0 && <p className="person-picker-empty">没有匹配的人员</p>}
-      </div>
+      {view === "local" ? <>
+        <input className="person-picker-search" value={query} autoFocus placeholder="搜索姓名" onChange={(event) => setQuery(event.target.value)} onKeyDown={onKeyDown} aria-label="搜索人员" />
+        <div className="person-picker-list" role="listbox" aria-label="人员列表">
+          {filtered.map((person, index) => <button type="button" role="option" aria-selected={person.id === value} className={`person-picker-option${index === activeIndex ? " active" : ""}`} onMouseEnter={() => setActive(index)} onClick={() => choose(person.id)} key={person.id}>{person.name}</button>)}
+          {filtered.length === 0 && <p className="person-picker-empty">本地没有匹配的人员</p>}
+        </div>
+      </> : <div className="person-lookup">
+        <div className="person-lookup-dims" role="tablist" aria-label="查询维度">
+          {QUERY_DIMENSIONS.map((item) => <button type="button" role="tab" aria-selected={dimension === item.key} className={dimension === item.key ? "active" : ""} onClick={() => { setDimension(item.key); setLookupError(""); setLookupChoices(null); }} key={item.key}>{item.label}</button>)}
+        </div>
+        <div className={`person-lookup-form${isNameMode ? " name-mode" : ""}`}>
+          <input ref={lookupInputRef} className="person-lookup-input" value={lookupValue} placeholder={dimensionItem.placeholder} onChange={(event) => { setLookupValue(event.target.value); setLookupError(""); setLookupChoices(null); }} onKeyDown={onLookupKeyDown} disabled={lookupBusy} aria-label="查询内容" />
+          {!isNameMode && <button type="button" className="person-lookup-submit" onClick={submitLookup} disabled={lookupBusy || !lookupValue.trim()}>{lookupBusy ? "查询中…" : "查询"}</button>}
+        </div>
+        {isNameMode ? <div className="person-picker-list" role="listbox" aria-label="本地人员列表">
+          {nameMatches.map((person, index) => <button type="button" role="option" aria-selected={person.id === value} className={`person-picker-option${index === activeIndex ? " active" : ""}`} onMouseEnter={() => setActive(index)} onClick={() => choose(person.id)} key={person.id}>{person.name}</button>)}
+          {nameMatches.length === 0 && <p className="person-picker-empty">本地没有匹配的人员</p>}
+        </div> : <>
+          {lookupError
+            ? <p className="person-lookup-message error" role="alert">{lookupError}</p>
+            : <p className="person-lookup-message">本地优先；未命中会在线查询并直接保存到本地人员。</p>}
+          {lookupChoices && <div className="person-picker-list">
+            {lookupChoices.map((person) => <button type="button" className="person-picker-option" onClick={() => choose(person.id)} key={person.id}>{person.name}<small>{person.code || person.phone || "本地记录"}</small></button>)}
+          </div>}
+        </>}
+      </div>}
     </div>}
   </div>;
 }
-
-/** 批量新增人员时的租户多选器：默认全选，支持按名称搜索。 */
-function BatchTenantPicker({ tenants, value, onChange }) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const rootRef = useRef(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event) => {
-      if (rootRef.current && !rootRef.current.contains(event.target)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    return () => document.removeEventListener("mousedown", onPointerDown);
-  }, [open]);
-
-  const selected = new Set(value);
-  const term = query.trim().toLocaleLowerCase();
-  const filtered = tenants.filter((tenant) => tenant.name.toLocaleLowerCase().includes(term));
-  const allSelected = tenants.length > 0 && tenants.every((tenant) => selected.has(tenant.id));
-  const filteredSelected = filtered.length > 0 && filtered.every((tenant) => selected.has(tenant.id));
-  const single = value.length === 1 ? tenants.find((tenant) => tenant.id === value[0]) : null;
-  let label = "请选择租户";
-  if (allSelected) label = `全部租户（${tenants.length} 个）`;
-  else if (single) label = single.name;
-  else if (value.length > 0) label = `已选择 ${value.length} / ${tenants.length} 个租户`;
-
-  return <div className="popup-batch-tenant-picker" ref={rootRef}>
-    <button type="button" className="popup-batch-tenant-trigger" aria-expanded={open} aria-haspopup="group" onClick={() => setOpen(!open)}>
-      <span>{label}</span><span className="popup-batch-tenant-arrow" aria-hidden="true">{open ? "▴" : "▾"}</span>
-    </button>
-    {open && <div className="popup-batch-tenant-panel" role="group" aria-label="选择租户">
-      <input className="popup-batch-tenant-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索租户名称" aria-label="搜索租户名称" autoFocus />
-      <label className="popup-batch-tenant-option popup-batch-tenant-all">
-        <input type="checkbox" checked={filteredSelected} onChange={(event) => {
-          const ids = new Set(filtered.map((tenant) => tenant.id));
-          onChange(event.target.checked ? [...new Set([...value, ...ids])] : value.filter((id) => !ids.has(id)));
-        }} />
-        <span>全选当前结果</span>
-      </label>
-      {filtered.map((tenant) => <label className="popup-batch-tenant-option" key={tenant.id}>
-        <input type="checkbox" checked={selected.has(tenant.id)} onChange={(event) => onChange(event.target.checked ? [...value, tenant.id] : value.filter((id) => id !== tenant.id))} />
-        <span>{tenant.name}</span><small>{tenant.deployment === "saas" ? "SaaS" : "本地化"}</small>
-      </label>)}
-      {filtered.length === 0 && <p className="popup-batch-tenant-empty">没有匹配的租户</p>}
-    </div>}
-  </div>;
-}
-
 export function PopupApp() {
   const isExtension = Boolean(globalThis.chrome?.runtime?.id && globalThis.chrome?.storage?.local && globalThis.chrome?.permissions);
   const [workspace, setWorkspace] = useState(null);
@@ -171,20 +242,24 @@ export function PopupApp() {
   const [busy, setBusy] = useState("");
   const [copied, setCopied] = useState(false);
   const [permissionOrigin, setPermissionOrigin] = useState("");
-  const [batchOpen, setBatchOpen] = useState(false);
-  const [batchView, setBatchView] = useState("form");
-  const [batchTenantIds, setBatchTenantIds] = useState([]);
-  const [batchForm, setBatchForm] = useState(blankBatchPerson);
-  const [batchBusy, setBatchBusy] = useState(false);
-  const [batchError, setBatchError] = useState("");
-  const [batchResult, setBatchResult] = useState(null);
   const generation = useRef(0);
 
   useEffect(() => {
-    loadWorkspace().then(setWorkspace).catch((error) => {
+    let active = true;
+    loadWorkspace().then((saved) => { if (active) setWorkspace(saved); }).catch((error) => {
+      if (!active) return;
       setNotice(error.message);
       setWorkspace(emptyWorkspace());
     });
+    const onChanged = (changes, area) => {
+      if (area !== "local" || !changes?.[STORAGE_KEY]) return;
+      loadWorkspace().then((saved) => { if (active) setWorkspace(saved); }).catch(() => {});
+    };
+    globalThis.chrome?.storage?.onChanged?.addListener(onChanged);
+    return () => {
+      active = false;
+      globalThis.chrome?.storage?.onChanged?.removeListener(onChanged);
+    };
   }, []);
 
   const tenant = workspace?.tenants.find((item) => item.id === workspace.selectedTenantId);
@@ -203,8 +278,10 @@ export function PopupApp() {
     setNotice("");
     try {
       await saveWorkspace(next);
+      return true;
     } catch (error) {
       setNotice(`保存失败：${error.message}`);
+      return false;
     }
   }
 
@@ -296,101 +373,59 @@ export function PopupApp() {
     }
   }
 
-  function openBatch() {
-    if (!workspace?.tenants.length) return;
-    setBatchView("form");
-    setBatchTenantIds(workspace.tenants.map((item) => item.id));
-    setBatchForm({ ...blankBatchPerson });
-    setBatchBusy(false);
-    setBatchError("");
-    setBatchResult(null);
-    setBatchOpen(true);
-  }
-
-  function closeBatch() {
-    if (batchBusy) return;
-    setBatchOpen(false);
-    setBatchError("");
-    setBatchResult(null);
-  }
-
-  function updateBatchForm(field, value) {
-    setBatchForm((current) => ({ ...current, [field]: value }));
-  }
-
-  async function saveBatchPerson(event) {
-    event.preventDefault();
-    if (batchBusy) return;
-    const targets = workspace.tenants.filter((item) => batchTenantIds.includes(item.id));
-    if (!targets.length) {
-      setBatchError("请至少选择一个租户");
-      return;
+  /** 本地优先的人员查询：命中本地直接选中；未命中调接口，查到后保存并选中。 */
+  async function lookupPerson({ dimension, value }) {
+    if (!tenant) throw new Error("请先选择租户");
+    const clean = validateLookupValue(dimension, value);
+    // 写前重读，避免设置页刚保存的人员被旧快照覆盖。
+    const latest = await loadWorkspace().catch(() => workspace);
+    const target = latest.tenants.find((item) => item.id === tenant.id);
+    if (!target) throw new Error("该租户已被删除，请重新选择租户");
+    const matches = findLocalMatches(target.people, { dimension, value: clean });
+    if (matches.length > 1) return { status: "choose", people: matches };
+    if (matches.length === 1) {
+      const next = { ...latest, selectedTenantId: target.id, selectedPersonId: matches[0].id };
+      reset();
+      await persist(next);
+      setNotice(`已从本地记录选中：${matches[0].name}`);
+      return { status: "selected" };
     }
-    setBatchBusy(true);
-    setBatchError("");
-    const sharedId = crypto.randomUUID();
-    const peopleByTenant = new Map();
-    const succeeded = [];
-    const failed = [];
-    for (const target of targets) {
-      try {
-        let person = { ...batchForm };
-        if (!String(person.name || "").trim()) {
-          const resolved = await resolveStaff(target, person, {
-            authorize: authorizeTenant,
-            noConditionError: "请填写人员 ID、工号、手机号或邮箱之一",
-          });
-          person = {
-            ...person,
-            name: resolved.name,
-            staffId: String(person.staffId || "").trim() || resolved.staffId,
-            code: String(person.code || "").trim() || resolved.code,
-            phone: String(person.phone || "").trim() || resolved.phone,
-            email: String(person.email || "").trim() || resolved.email,
-          };
-        }
-        peopleByTenant.set(target.id, normalizePerson({ ...person, id: sharedId }));
-        succeeded.push({ tenantId: target.id, tenantName: target.name });
-      } catch (error) {
-        failed.push({ tenantId: target.id, tenantName: target.name, error: error?.message || String(error) });
-      }
-    }
-    if (succeeded.length) {
-      try {
-        const tenants = workspace.tenants.map((item) => peopleByTenant.has(item.id)
-          ? { ...item, people: [...item.people, peopleByTenant.get(item.id)] }
-          : item);
-        const selectedTenantId = peopleByTenant.has(workspace.selectedTenantId)
-          ? workspace.selectedTenantId
-          : workspace.tenants.find((item) => peopleByTenant.has(item.id))?.id ?? workspace.selectedTenantId;
-        const saved = await saveWorkspace({ ...workspace, tenants, selectedTenantId, selectedPersonId: sharedId });
-        setWorkspace(saved);
-        reset();
-      } catch (error) {
-        setBatchError(`保存失败：${error.message}`);
-        setBatchBusy(false);
-        return;
-      }
-    }
-    setBatchResult({ succeeded, failed });
-    setBatchView("result");
-    setBatchBusy(false);
+    if (!isExtension) throw new Error("网页预览不能连接 OpenAPI，请在扩展弹窗中使用。");
+    await requestOriginPermission(target.baseUrl);
+    const resolved = await resolveStaff(target, lookupQueryPerson(dimension, clean), {
+      authorize: authorizeTenant,
+      noConditionError: "请填写人员 ID、工号、手机号或邮箱之一",
+    });
+    const merged = mergeResolvedPerson(target.people, resolved, { makeId: () => crypto.randomUUID() });
+    const nextWorkspace = {
+      ...latest,
+      tenants: latest.tenants.map((item) => item.id === target.id ? { ...target, people: merged.people } : item),
+      selectedTenantId: target.id,
+      selectedPersonId: merged.person.id,
+    };
+    reset();
+    const saved = await persist(nextWorkspace);
+    if (!saved) throw new Error("已查询到人员，但保存到本地失败，请重试");
+    const label = LOOKUP_DIMENSIONS.find((item) => item.key === dimension)?.label || "查询";
+    setNotice(merged.created
+      ? `已查询并保存到本地人员：${merged.person.name}（${label} ${clean}）`
+      : `已刷新本地人员记录：${merged.person.name}（${label} ${clean}）`);
+    return { status: "selected" };
   }
 
   if (!workspace) return <main className="popup-loading">正在读取本地资料…</main>;
   const canGenerate = Boolean(tenant && person && !busy);
-  return <main className={`popup-shell${batchOpen ? " popup-shell-batch" : ""}`}>
+  return <main className="popup-shell">
     <header className="popup-header">
       <div className="popup-brand"><img className="popup-logo" src="./icons/icon-48.png" alt="" /><div><h1>小合·易联</h1><p>{RULE_LABEL}</p></div></div>
       <div className="popup-header-actions">
-        <button className="popup-batch-add" type="button" disabled={!isExtension || !workspace.tenants.length} title="批量新增人员" onClick={openBatch}><span className="popup-batch-plus" aria-hidden="true">＋</span>批量新增</button>
         <button className="popup-settings" type="button" title="打开租户和人员管理" aria-label="打开租户和人员管理" onClick={openSettings}><Settings size={23} /></button>
       </div>
     </header>
 
     <section className="popup-fields" aria-label="快捷生成设置">
       <div className="popup-row"><span>租户</span><TenantPicker tenants={workspace.tenants} value={tenant?.id || ""} onChange={selectTenant} disabled={!workspace.tenants.length} /></div>
-      <div className="popup-row"><span>人员</span><PersonPicker people={tenant?.people || []} value={person?.id || ""} onChange={selectPerson} disabled={!tenant} /></div>
+      <div className="popup-row"><span>人员</span><PersonPicker people={tenant?.people || []} value={person?.id || ""} onChange={selectPerson} onLookup={lookupPerson} disabled={!tenant} /></div>
       <div className="popup-row"><span>链接</span><div className="popup-link" title={result?.url || "生成后显示访问链接"}><span>{result?.url || "生成后显示访问链接"}</span><button type="button" disabled={!result} title="复制链接" aria-label="复制链接" onClick={copyLink}>{copied ? <Check size={19} /> : <Copy size={19} />}</button></div></div>
     </section>
 
@@ -402,41 +437,5 @@ export function PopupApp() {
       <button className="popup-button popup-secondary" type="button" disabled={!result} onClick={copyLink}>{copied ? <Check size={18} /> : <Copy size={18} />}{copied ? "已复制" : "复制链接"}</button>
       <button className="popup-button popup-secondary popup-open" type="button" disabled={!result} onClick={openLink}><ExternalLink size={18} />打开链接</button>
     </div>
-
-    {batchOpen && <div className="popup-batch-backdrop">
-      <section className="popup-batch-modal" role="dialog" aria-modal="true" aria-label="批量新增人员">
-        <header className="popup-batch-header">
-          <h2>{batchView === "result" ? "批量新增结果" : "批量新增人员"}</h2>
-          <button className="popup-batch-close" type="button" disabled={batchBusy} title="关闭" aria-label="关闭" onClick={closeBatch}>×</button>
-        </header>
-        <div className="popup-batch-body">
-          {batchError && <p className="popup-batch-error" role="alert">{batchError}</p>}
-          {batchView === "form" ? <form id="popup-batch-form" className="popup-batch-form" onSubmit={saveBatchPerson}>
-            <div className="popup-batch-field"><span>租户</span><BatchTenantPicker tenants={workspace.tenants} value={batchTenantIds} onChange={setBatchTenantIds} /></div>
-            <label className="popup-batch-field"><span>姓名</span><input value={batchForm.name} onChange={(event) => updateBatchForm("name", event.target.value)} placeholder="留空后从员工信息自动回填" autoComplete="off" /></label>
-            <label className="popup-batch-field"><span>人员 ID</span><input value={batchForm.staffId} onChange={(event) => updateBatchForm("staffId", event.target.value)} autoComplete="off" /></label>
-            <label className="popup-batch-field"><span>工号（Code）</span><input value={batchForm.code} onChange={(event) => updateBatchForm("code", event.target.value)} autoComplete="off" /></label>
-            <label className="popup-batch-field"><span>手机号</span><input type="tel" value={batchForm.phone} onChange={(event) => updateBatchForm("phone", event.target.value)} autoComplete="off" /></label>
-            <label className="popup-batch-field"><span>邮箱</span><input type="email" value={batchForm.email} onChange={(event) => updateBatchForm("email", event.target.value)} autoComplete="off" /></label>
-            <p className="popup-batch-note">已选择 {batchTenantIds.length} 个租户。至少填写人员 ID、工号、手机号或邮箱之一；姓名为空时会分别使用各租户凭证匹配员工，失败租户将跳过。</p>
-          </form> : batchResult && <div className="popup-batch-result">
-            <p className="popup-batch-summary">成功 <strong>{batchResult.succeeded.length}</strong> 个租户，未匹配 <strong>{batchResult.failed.length}</strong> 个租户。</p>
-            <section className="popup-batch-result-section">
-              <h3>成功租户（{batchResult.succeeded.length}）</h3>
-              {batchResult.succeeded.length ? <ul>{batchResult.succeeded.map((item) => <li key={item.tenantId}>{item.tenantName}</li>)}</ul> : <p>无</p>}
-            </section>
-            <section className="popup-batch-result-section popup-batch-result-failed">
-              <h3>未匹配租户（{batchResult.failed.length}）</h3>
-              {batchResult.failed.length ? <ul>{batchResult.failed.map((item) => <li key={item.tenantId}><strong>{item.tenantName}</strong><span>{item.error}</span></li>)}</ul> : <p>无</p>}
-            </section>
-          </div>}
-        </div>
-        <footer className="popup-batch-footer">
-          {batchView === "form"
-            ? <><button className="popup-batch-cancel" type="button" disabled={batchBusy} onClick={closeBatch}>取消</button><button className="popup-batch-submit" type="submit" form="popup-batch-form" disabled={batchBusy || !batchTenantIds.length}>{batchBusy ? "处理中…" : "保存"}</button></>
-            : <button className="popup-batch-submit" type="button" onClick={closeBatch}>关闭</button>}
-        </footer>
-      </section>
-    </div>}
   </main>;
 }

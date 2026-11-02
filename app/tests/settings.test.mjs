@@ -41,6 +41,21 @@ test("settings page supports cURL import, blank enterprise ID and batch person c
   assert.match(source, /resolveStaff/);
 });
 
+test("settings page supports Excel import for tenants and people", async () => {
+  const source = await readFile(new URL("../src/App.jsx", import.meta.url), "utf8");
+  const people = await readFile(new URL("../src/PeopleView.jsx", import.meta.url), "utf8");
+  assert.match(source, /从 Excel 批量导入/);
+  assert.match(source, /从 Excel 导入/);
+  assert.match(source, /下载导入模板/);
+  assert.match(source, /planTenantImport/);
+  assert.match(source, /planPersonImport/);
+  assert.match(source, /savePeopleToTenants/);
+  assert.match(source, /requestOriginPermissions/);
+  assert.match(people, /导入人员/);
+  // 导入走增量合并，不得整体替换既有资料。
+  assert.doesNotMatch(source, /replaceWorkspace/);
+});
+
 test("personnel table lists email and searches by email", async () => {
   const peopleSource = await readFile(new URL("../src/PeopleView.jsx", import.meta.url), "utf8");
   assert.match(peopleSource, /邮箱/);

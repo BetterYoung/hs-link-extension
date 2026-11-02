@@ -24,6 +24,41 @@ export async function requestOriginPermission(origin, browser = globalThis.chrom
   if (!granted) throw new Error(`未授予 ${origin} 的访问权限`);
 }
 
+/**
+ * 批量申请多个域名的访问权限：一次调用、一个用户手势。
+ * 返回是否全部授予；调用方据此决定继续导入还是整体取消。
+ */
+export async function requestOriginPermissions(origins, browser = globalThis.chrome) {
+  if (!browser?.permissions) throw new Error("仅能在 Chrome/Edge 扩展中请求 API 域名权限");
+  const patterns = [...new Set((origins || []).filter(Boolean).map(permissionPattern))];
+  if (!patterns.length) return true;
+  return Boolean(await browser.permissions.request({ origins: patterns }));
+}
+
+/**
+ * 按租户缓存授权结果，供批量场景复用：同一租户在一次批量操作内只换一次 token。
+ * 授权失败时不缓存，下一次调用会重新授权。
+ */
+export function createTenantAuthorizer({ fetchImpl = fetch, authorize = authorizeTenant } = {}) {
+  const cache = new Map();
+  return {
+    async authorize(tenant) {
+      const key = String(tenant.id || `${tenant.baseUrl}|${tenant.appKey}`);
+      if (!cache.has(key)) {
+        const pending = authorize(tenant, { fetchImpl }).catch((error) => {
+          cache.delete(key);
+          throw error;
+        });
+        cache.set(key, pending);
+      }
+      return cache.get(key);
+    },
+    clear() {
+      cache.clear();
+    },
+  };
+}
+
 async function requestJson(fetchImpl, url, { method = "GET", body, stage }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);

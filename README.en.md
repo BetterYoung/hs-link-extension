@@ -21,6 +21,14 @@ Current version: **1.4.3** ([CHANGELOG.md](./CHANGELOG.md))
 
 Download the ready-to-install package from the [Releases page](https://github.com/BetterYoung/hs-link-extension/releases).
 
+> [!IMPORTANT]
+> When loading from source, select the **`app/dist/client`** folder itself (`hs-link-extension/app/dist/client`).
+> The repository root, `app/` and `app/dist/` do **not** contain a `manifest.json`, and selecting any of them
+> makes the browser fail with "Manifest file is missing or unreadable / Could not load manifest".
+> Rule of thumb: the selected folder must directly contain `manifest.json`, `popup.html`, `index.html` and `icons/`.
+>
+> After re-running `npm run build`, asset filenames get new hashes — click **Reload** on the extension card for the changes to take effect.
+
 ## Use
 
 ### 1. First tenant

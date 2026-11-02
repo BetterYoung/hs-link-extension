@@ -1,22 +1,37 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, Eye, EyeOff, FileUp, Pencil, Plus, Search, Trash2, X } from "lucide-react";
-import { createBackup, emptyWorkspace, loadWorkspace, normalizePerson, normalizeTenant, parseBackup, saveWorkspace } from "./model.js";
-import { authorizeTenant, parseCurlCommand, resolveStaff } from "./openapi.js";
+import { createBackup, emptyWorkspace, loadWorkspace, normalizePerson, normalizeTenant, parseBackup, saveWorkspace, STORAGE_KEY } from "./model.js";
+import { authorizeTenant, createTenantAuthorizer, parseCurlCommand, requestOriginPermissions, resolveStaff } from "./openapi.js";
 import { PeopleView } from "./PeopleView.jsx";
-import { resolveStaffForTenants, upsertPerson } from "./tenantOps.js";
+import { ImportPreview } from "./ImportPreview.jsx";
+import { planPersonImport, personTemplateSheets, PERSON_IMPORT_LIMIT } from "./importPeople.js";
+import { mergeTenantImport, planTenantImport, tenantTemplateSheets, TENANT_IMPORT_LIMIT } from "./importTenants.js";
+import { savePeopleToTenants, groupResultsByPerson, upsertPerson } from "./tenantOps.js";
+import { buildWorkbook, pickSheet, readSheets, XLSX_MIME } from "./xlsx.js";
 import { SAAS_ORIGIN } from "./config.js";
 
 const SAAS_DEFAULT_ORIGIN = SAAS_ORIGIN;
+const IMPORT_FILE_LIMIT = 5 * 1024 * 1024;
 const blankTenant = { name: "", corporationId: "", baseUrl: SAAS_DEFAULT_ORIGIN, deployment: "saas", appKey: "", appSecurity: "" };
 const blankPerson = { name: "", staffId: "", code: "", phone: "", email: "" };
+
+function downloadBytes(filename, bytes) {
+  const blob = new Blob([bytes], { type: XLSX_MIME });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 function Field({ label, ...props }) {
   return <label className="field"><span>{label}</span><input {...props} /></label>;
 }
 
-function Modal({ title, children, onClose, footer, error }) {
+function Modal({ title, children, onClose, footer, error, wide }) {
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <section className="modal" role="dialog" aria-modal="true" aria-label={title}>
+    <section className={`modal${wide ? " modal-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
       <header><h2>{title}</h2><button type="button" className="icon-button" title="关闭" aria-label="关闭" onClick={onClose}><X size={20} /></button></header>
       <div className="modal-body">{error && <p className="modal-error" role="alert">{error}</p>}{children}</div>
       <footer>{footer}</footer>
@@ -76,6 +91,93 @@ function BatchTenantPicker({ tenants, value, onChange }) {
   </div>;
 }
 
+/** 人员五个字段，手动填写与导入两种来源共用。 */
+function PersonFields({ form, onChange }) {
+  return <>
+    <Field label="姓名" value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} placeholder="留空后从员工信息自动回填" />
+    <Field label="人员 ID" value={form.staffId} onChange={(event) => onChange({ ...form, staffId: event.target.value })} />
+    <Field label="工号（Code）" value={form.code} onChange={(event) => onChange({ ...form, code: event.target.value })} />
+    <Field label="手机号" type="tel" value={form.phone} onChange={(event) => onChange({ ...form, phone: event.target.value })} />
+    <Field label="邮箱" type="email" value={form.email} onChange={(event) => onChange({ ...form, email: event.target.value })} />
+  </>;
+}
+
+function PersonImportPreview({ plan, selectedTenantCount, busy, progress }) {
+  const okItems = plan.items.filter((item) => item.status === "ok" || item.status === "warn");
+  const invalid = plan.items.length - okItems.length;
+  const rows = plan.items.map((item) => ({
+    key: `person-row-${item.rowNumber}`,
+    tone: item.status === "error" ? "error" : item.status === "skip" ? "skip" : item.status === "warn" ? "warn" : "ok",
+    cells: [
+      item.rowNumber,
+      item.form.name || "（空）",
+      item.form.staffId || "—",
+      item.form.code || "—",
+      item.form.phone || "—",
+      item.form.email || "—",
+      item.error || item.warning || "待查询人员 ID",
+    ],
+  }));
+  return <>
+    <p className="import-summary">共 {plan.items.length} 行：可导入 <strong>{okItems.length}</strong> 行，跳过或错误 <strong>{invalid}</strong> 行；将写入 {okItems.length} × {selectedTenantCount} 个租户 = <strong>{okItems.length * selectedTenantCount}</strong> 条档案。</p>
+    {plan.exampleRows?.length ? <p className="form-note">已自动跳过第 {plan.exampleRows.join("、")} 行的示例数据。</p> : null}
+    {busy && progress && <p className="import-progress">正在导入 第 {progress.done} / {progress.total} 人…</p>}
+    <ImportPreview label="人员导入预览" headers={["行", "姓名", "人员 ID", "工号", "手机号", "邮箱", "状态"]} rows={rows} />
+  </>;
+}
+
+function TenantImportPreview({ plan, busy, progress }) {
+  const okItems = plan.items.filter((item) => item.status === "create" || item.status === "update");
+  const invalid = plan.items.length - okItems.length;
+  const label = { create: "新增", update: "更新", skip: "跳过", error: "错误" };
+  const rows = plan.items.map((item) => ({
+    key: `tenant-row-${item.rowNumber}`,
+    tone: item.status,
+    cells: [
+      item.rowNumber,
+      item.name || "（空）",
+      item.baseUrl || "—",
+      item.appKey || "—",
+      `${label[item.status]}${item.error ? `：${item.error}` : ""}`,
+    ],
+  }));
+  return <>
+    <p className="import-summary">共 {plan.items.length} 行：可导入 <strong>{okItems.length}</strong> 行（新增 {plan.items.filter((item) => item.status === "create").length}、更新 {plan.items.filter((item) => item.status === "update").length}），跳过或错误 <strong>{invalid}</strong> 行。</p>
+    {plan.exampleRows?.length ? <p className="form-note">已自动跳过第 {plan.exampleRows.join("、")} 行的示例数据。</p> : null}
+    {busy && progress && <p className="import-progress">正在处理 第 {progress.done} / {progress.total} 个租户…</p>}
+    <ImportPreview label="租户导入预览" headers={["行", "租户名称", "域名", "appKey", "状态"]} rows={rows} />
+  </>;
+}
+
+function failureText(list) {
+  return (list || []).map((item) => `第 ${item.rowNumber} 行${item.name ? ` ${item.name}` : ""}${item.error ? `：${item.error}` : ""}`).join("\n");
+}
+
+/** 导入人员结果：按人员行分组，只展开失败明细。 */
+function PersonResultBody({ result }) {
+  const groups = groupResultsByPerson(result.results);
+  const okCount = result.results.filter((item) => item.ok).length;
+  const failCount = result.results.length - okCount;
+  const rowNumbers = result.rowNumbers || [];
+  const rowLabel = (group) => rowNumbers[group.rowIndex] ?? group.rowIndex + 1;
+  return <div className="global-result-summary">
+    <p>共 {groups.length} 人，写入 <strong>{okCount}</strong> 条档案，失败 <strong>{failCount}</strong> 条{result.aborted ? "（已中止，已完成部分已保存）" : ""}{result.invalid?.length ? `；另有 ${result.invalid.length} 行未执行` : ""}。</p>
+    {groups.map((group) => {
+      const failed = group.items.filter((item) => !item.ok);
+      return <section className="global-result-section" key={group.personId}>
+        <h3>第 {rowLabel(group)} 行 {group.personName || "（未匹配姓名）"}（成功 {group.items.length - failed.length}/{group.items.length}）</h3>
+        {failed.length
+          ? <ul className="global-result-list">{failed.map((item) => <li key={item.tenantId}><strong>{item.tenantName}</strong><span>{item.error}</span></li>)}</ul>
+          : <p className="form-note">全部成功</p>}
+      </section>;
+    })}
+    {result.invalid?.length ? <section className="global-result-section global-result-failed">
+      <h3>未执行行（{result.invalid.length}）</h3>
+      <ul className="global-result-list">{result.invalid.map((item) => <li key={item.rowNumber}><strong>第 {item.rowNumber} 行</strong><span>{item.error}</span></li>)}</ul>
+    </section> : null}
+  </div>;
+}
+
 export function App() {
   const [workspace, setWorkspace] = useState(null);
   const [tenantQuery, setTenantQuery] = useState("");
@@ -89,8 +191,33 @@ export function App() {
   const [curlText, setCurlText] = useState("");
   const [batchResult, setBatchResult] = useState(null);
   const [batchTenantIds, setBatchTenantIds] = useState([]);
+  // 人员导入：与批量新增共用同一个对话框，仅切换数据来源。
+  const [personSource, setPersonSource] = useState("manual");
+  const [personPlan, setPersonPlan] = useState(null);
+  const [personFileName, setPersonFileName] = useState("");
+  const [personImportError, setPersonImportError] = useState("");
+  const [personImportBusy, setPersonImportBusy] = useState(false);
+  const [personImportProgress, setPersonImportProgress] = useState(null);
+  // 租户导入：独立对话框，走授权回填企业 ID。
+  const [tenantPlan, setTenantPlan] = useState(null);
+  const [tenantFileName, setTenantFileName] = useState("");
+  const [tenantImportError, setTenantImportError] = useState("");
+  const [tenantImportBusy, setTenantImportBusy] = useState(false);
+  const [tenantImportProgress, setTenantImportProgress] = useState(null);
+  const [tenantResult, setTenantResult] = useState(null);
+  const [copiedList, setCopiedList] = useState(false);
+  const importAbort = useRef(false);
+  const tenantFileInput = useRef(null);
+  const personFileInput = useRef(null);
   const fileInput = useRef(null);
   const writeQueue = useRef(Promise.resolve());
+  // 弹窗可以新增人员，设置页在对话框关闭时同步外部写入，避免旧快照覆盖。
+  const [externalWorkspace, setExternalWorkspace] = useState(null);
+  const dialogRef = useRef(null);
+
+  useEffect(() => {
+    dialogRef.current = dialog;
+  }, [dialog]);
 
   useEffect(() => {
     loadWorkspace().then(setWorkspace).catch((error) => {
@@ -99,7 +226,46 @@ export function App() {
     });
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const onChanged = (changes, area) => {
+      if (area !== "local" || !changes?.[STORAGE_KEY]) return;
+      loadWorkspace().then((next) => {
+        if (!active) return;
+        if (dialogRef.current) {
+          // 对话框打开时立即同步资料数据，但保留当前选中项，避免误保存到被切换的租户。
+          setExternalWorkspace(next);
+          setWorkspace((current) => current ? {
+            ...next,
+            selectedTenantId: current.selectedTenantId,
+            selectedPersonId: current.selectedPersonId,
+          } : next);
+        } else {
+          setWorkspace(next);
+        }
+      }).catch(() => {});
+    };
+    globalThis.chrome?.storage?.onChanged?.addListener(onChanged);
+    return () => {
+      active = false;
+      globalThis.chrome?.storage?.onChanged?.removeListener(onChanged);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (dialog === null && externalWorkspace) {
+      setWorkspace(externalWorkspace);
+      setExternalWorkspace(null);
+    }
+  }, [dialog, externalWorkspace]);
+
   const tenant = workspace?.tenants.find((item) => item.id === workspace.selectedTenantId);
+  const personFailureText = batchResult?.results
+    ? groupResultsByPerson(batchResult.results).flatMap((group) => group.items
+      .filter((item) => !item.ok)
+      .map((item) => `第 ${(batchResult.rowNumbers || [])[group.rowIndex] ?? group.rowIndex + 1} 行 ${group.personName || ""} @ ${item.tenantName}：${item.error}`))
+      .join("\n")
+    : "";
   const personToDelete = tenant?.people.find((item) => item.id === form?.id);
   const normalizedTenantQuery = tenantQuery.trim().toLocaleLowerCase();
   const visibleTenants = workspace?.tenants.filter((item) => [item.name, item.corporationId]
@@ -125,6 +291,15 @@ export function App() {
     setNotice("");
     setCurlText("");
     setBatchResult(null);
+    setPersonSource("manual");
+    setPersonPlan(null);
+    setPersonFileName("");
+    setPersonImportError("");
+    setTenantPlan(null);
+    setTenantFileName("");
+    setTenantImportError("");
+    setTenantResult(null);
+    setCopiedList(false);
     setBatchTenantIds(kind === "BatchPerson" ? workspace.tenants.map((tenant) => tenant.id) : []);
     setDialog(`${item ? "edit" : "add"}${kind}`);
   }
@@ -177,40 +352,30 @@ export function App() {
     try {
       if (dialog === "addBatchPerson") {
         if (!workspace?.tenants?.length) throw new Error("请先新增租户");
-        const sharedId = crypto.randomUUID();
         const selectedIds = new Set(batchTenantIds);
         const targets = workspace.tenants.filter((item) => selectedIds.has(item.id));
         if (!targets.length) throw new Error("请至少选择一个租户");
-        const results = await resolveStaffForTenants(targets, form);
-        const peopleByTenant = new Map();
-        const personIdByTenant = new Map();
-        const succeeded = [];
-        const failed = [];
-        for (const result of results) {
-          if (result.error) {
-            failed.push({ tenantId: result.tenantId, tenantName: result.tenantName, error: result.error });
-            continue;
-          }
-          try {
-            const target = workspace.tenants.find((item) => item.id === result.tenantId);
-            const upserted = upsertPerson(target.people, normalizePerson({ ...result.person, id: sharedId }));
-            peopleByTenant.set(result.tenantId, upserted.people);
-            personIdByTenant.set(result.tenantId, upserted.person.id);
-            succeeded.push({ tenantId: result.tenantId, tenantName: result.tenantName });
-          } catch (error) {
-            failed.push({ tenantId: result.tenantId, tenantName: result.tenantName, error: error?.message || String(error) });
-          }
-        }
+        const granted = await requestOriginPermissions(targets.map((item) => item.baseUrl));
+        if (!granted) throw new Error("未授予域名访问权限，已取消保存");
+        const session = createTenantAuthorizer();
+        const resolve = (target, person) => resolveStaff(target, person, { authorize: session.authorize });
+        const { tenants: resolvedTenants, results } = await savePeopleToTenants(targets, [form], { resolve });
+        const succeeded = results.filter((item) => item.ok)
+          .map((item) => ({ tenantId: item.tenantId, tenantName: item.tenantName }));
+        const failed = results.filter((item) => !item.ok)
+          .map((item) => ({ tenantId: item.tenantId, tenantName: item.tenantName, error: item.error }));
         if (succeeded.length) {
+          const peopleByTenant = new Map(resolvedTenants.map((item) => [item.id, item.people]));
+          const personIdByTenant = new Map(results.filter((item) => item.ok).map((item) => [item.tenantId, item.personId]));
           const tenants = workspace.tenants.map((item) => peopleByTenant.has(item.id) ? { ...item, people: peopleByTenant.get(item.id) } : item);
-          const selectedTenantId = peopleByTenant.has(workspace.selectedTenantId)
+          const selectedTenantId = personIdByTenant.has(workspace.selectedTenantId)
             ? workspace.selectedTenantId
-            : tenants.find((item) => peopleByTenant.has(item.id)).id;
+            : results.find((item) => item.ok).tenantId;
           persist({
             ...workspace,
             tenants,
             selectedTenantId,
-            selectedPersonId: personIdByTenant.get(selectedTenantId) ?? sharedId,
+            selectedPersonId: personIdByTenant.get(selectedTenantId),
           });
         }
         setBatchResult({ succeeded, failed });
@@ -248,6 +413,220 @@ export function App() {
     } finally {
       setSaving(false);
     }
+  }
+
+  function downloadTenantTemplate() {
+    downloadBytes("小合易联-租户导入模板.xlsx", buildWorkbook({ sheets: tenantTemplateSheets() }));
+  }
+
+  function downloadPersonTemplate() {
+    downloadBytes("小合易联-人员导入模板.xlsx", buildWorkbook({ sheets: personTemplateSheets() }));
+  }
+
+  function openTenantImport() {
+    setTenantPlan(null);
+    setTenantFileName("");
+    setTenantImportError("");
+    setTenantResult(null);
+    setCopiedList(false);
+    setDialog("tenantImport");
+  }
+
+  function openPersonImport() {
+    openDialog("BatchPerson");
+    setPersonSource("file");
+  }
+
+  async function readImportRows(file, preferred) {
+    if (file.size > IMPORT_FILE_LIMIT) throw new Error("文件不能超过 5 MB");
+    const sheets = readSheets(new Uint8Array(await file.arrayBuffer()));
+    return pickSheet(sheets, preferred).rows;
+  }
+
+  async function handleTenantFile(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setTenantImportError("");
+    setTenantResult(null);
+    setTenantFileName(file.name);
+    try {
+      const rows = await readImportRows(file, ["租户"]);
+      setTenantPlan(planTenantImport(rows, { existing: workspace.tenants, defaultOrigin: SAAS_DEFAULT_ORIGIN }));
+    } catch (error) {
+      setTenantPlan(null);
+      setTenantImportError(error.message);
+    }
+  }
+
+  async function handlePersonFile(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setPersonImportError("");
+    setPersonFileName(file.name);
+    try {
+      const rows = await readImportRows(file, ["人员"]);
+      setPersonPlan(planPersonImport(rows));
+    } catch (error) {
+      setPersonPlan(null);
+      setPersonImportError(error.message);
+    }
+  }
+
+  async function executeTenantRows(runnable) {
+    setTenantImportBusy(true);
+    setTenantImportError("");
+    importAbort.current = false;
+    setTenantImportProgress({ done: 0, total: runnable.length });
+    try {
+      const granted = await requestOriginPermissions(runnable.map((item) => item.baseUrl));
+      if (!granted) {
+        setTenantImportError("未授予域名访问权限，导入已取消");
+        return null;
+      }
+      const executed = [];
+      for (const item of runnable) {
+        if (importAbort.current) break;
+        try {
+          const authorized = await authorizeTenant({
+            name: item.name, corporationId: "", baseUrl: item.baseUrl, deployment: item.deployment,
+            appKey: item.appKey, appSecurity: item.appSecurity, people: [],
+          });
+          executed.push({ item, corporationId: authorized.corporationId });
+        } catch (error) {
+          executed.push({ item, error: error?.message || String(error) });
+        }
+        setTenantImportProgress({ done: executed.length, total: runnable.length });
+      }
+      return { executed, aborted: importAbort.current };
+    } finally {
+      setTenantImportBusy(false);
+      setTenantImportProgress(null);
+      importAbort.current = false;
+    }
+  }
+
+  function applyTenantExecuted(executed, aborted) {
+    const merged = mergeTenantImport(workspace, executed, { makeId: () => crypto.randomUUID() });
+    if (merged.changed) {
+      persist({
+        ...workspace,
+        tenants: merged.tenants,
+        selectedTenantId: merged.selectedTenantId,
+        selectedPersonId: merged.selectedPersonId,
+      });
+      setTenantQuery("");
+    }
+    setTenantResult((previous) => {
+      const retried = new Set(executed.map((entry) => entry.item.rowNumber));
+      return {
+        added: [...(previous?.added || []), ...merged.added],
+        updated: [...(previous?.updated || []), ...merged.updated],
+        failed: [...(previous?.failed || []).filter((item) => !retried.has(item.rowNumber)), ...merged.failed],
+        invalid: previous?.invalid || (tenantPlan
+          ? tenantPlan.items.filter((item) => item.status === "error" || item.status === "skip")
+            .map((item) => ({ rowNumber: item.rowNumber, name: item.name, error: item.error }))
+          : []),
+        retryItems: executed.filter((entry) => entry.error).map((entry) => entry.item),
+        aborted,
+      };
+    });
+  }
+
+  async function runTenantImport() {
+    if (!tenantPlan || tenantImportBusy) return;
+    const runnable = tenantPlan.items.filter((item) => item.status === "create" || item.status === "update");
+    if (!runnable.length) {
+      setTenantImportError("没有可导入的行，请检查预览中的错误");
+      return;
+    }
+    try {
+      const outcome = await executeTenantRows(runnable);
+      if (!outcome) return;
+      applyTenantExecuted(outcome.executed, outcome.aborted);
+      setDialog("tenantImportResult");
+    } catch (error) {
+      setTenantImportError(error?.message || String(error));
+    }
+  }
+
+  async function retryTenantImport() {
+    if (!tenantResult?.retryItems?.length || tenantImportBusy) return;
+    try {
+      const outcome = await executeTenantRows(tenantResult.retryItems);
+      if (!outcome) return;
+      applyTenantExecuted(outcome.executed, outcome.aborted);
+    } catch (error) {
+      setTenantImportError(error?.message || String(error));
+    }
+  }
+
+  async function runPersonImport() {
+    if (!personPlan || personImportBusy) return;
+    const runnable = personPlan.items.filter((item) => item.status === "ok" || item.status === "warn");
+    const selectedIds = new Set(batchTenantIds);
+    const targets = workspace.tenants.filter((item) => selectedIds.has(item.id));
+    if (!runnable.length) {
+      setPersonImportError("没有可导入的人员，请检查预览中的错误");
+      return;
+    }
+    if (!targets.length) {
+      setPersonImportError("请至少选择一个租户");
+      return;
+    }
+    setPersonImportBusy(true);
+    setPersonImportError("");
+    importAbort.current = false;
+    setPersonImportProgress({ done: 0, total: runnable.length });
+    try {
+      const granted = await requestOriginPermissions(targets.map((item) => item.baseUrl));
+      if (!granted) {
+        setPersonImportError("未授予域名访问权限，导入已取消");
+        return;
+      }
+      const session = createTenantAuthorizer();
+      const resolve = (target, person) => resolveStaff(target, person, { authorize: session.authorize });
+      const signal = { get aborted() { return importAbort.current; } };
+      const outcome = await savePeopleToTenants(targets, runnable.map((item) => item.form), {
+        resolve,
+        alwaysResolve: true,
+        signal,
+        onProgress: ({ index, total }) => setPersonImportProgress({ done: Math.min(index + 1, total), total }),
+      });
+      const peopleByTenant = new Map(outcome.tenants.map((item) => [item.id, item.people]));
+      persist({
+        ...workspace,
+        tenants: workspace.tenants.map((item) => peopleByTenant.has(item.id) ? { ...item, people: peopleByTenant.get(item.id) } : item),
+      });
+      setBatchResult({
+        results: outcome.results,
+        aborted: outcome.aborted,
+        rowNumbers: runnable.map((item) => item.rowNumber),
+        invalid: personPlan.items
+          .filter((item) => item.status === "error" || item.status === "skip")
+          .map((item) => ({ rowNumber: item.rowNumber, error: item.error })),
+      });
+      setDialog("globalPersonResult");
+    } catch (error) {
+      setPersonImportError(error?.message || String(error));
+    } finally {
+      setPersonImportBusy(false);
+      setPersonImportProgress(null);
+      importAbort.current = false;
+    }
+  }
+
+  function cancelImport() {
+    importAbort.current = true;
+  }
+
+  function copyFailures(text) {
+    if (!text) return;
+    navigator.clipboard?.writeText(text).then(
+      () => setCopiedList(true),
+      () => setCopiedList(false),
+    );
   }
 
   function remove() {
@@ -348,15 +727,20 @@ export function App() {
         </section>
         <section className="people-section" aria-label="人员管理">
           <h2>人员管理</h2>
-          <PeopleView tenant={tenant} selectedPersonId={workspace.selectedPersonId} query={peopleQuery} onQueryChange={setPeopleQuery} onAdd={() => openDialog("Person")} onEdit={(person) => openDialog("Person", person)} onDelete={askDeletePerson} />
+          <PeopleView tenant={tenant} selectedPersonId={workspace.selectedPersonId} query={peopleQuery} onQueryChange={setPeopleQuery} onAdd={() => openDialog("Person")} onImport={openPersonImport} onEdit={(person) => openDialog("Person", person)} onDelete={askDeletePerson} />
         </section>
       </> : <section className="workspace-empty"><div><h1>开始维护租户资料</h1><p>新增租户后，可继续维护该租户下的人员档案。</p><button className="primary-button" onClick={() => openDialog("Tenant")}><Plus size={19} />新增租户</button></div></section>}
     </main>
     <input ref={fileInput} className="visually-hidden" type="file" accept=".json,application/json" onChange={importBackup} />
+    <input ref={tenantFileInput} className="visually-hidden" type="file" accept=".xlsx" onChange={handleTenantFile} />
+    <input ref={personFileInput} className="visually-hidden" type="file" accept=".xlsx" onChange={handlePersonFile} />
 
     {(dialog === "addTenant" || dialog === "editTenant") && <Modal title={dialog === "addTenant" ? "新增租户" : "编辑租户"} error={notice} onClose={() => setDialog(null)} footer={<><button className="secondary-button" onClick={() => setDialog(null)}>取消</button>{dialog === "editTenant" && <button className="danger-button" onClick={() => setDialog("deleteTenant")}><Trash2 size={16} />删除租户</button>}<button className="primary-button" type="submit" form="tenant-form" disabled={saving}>{saving ? "处理中…" : "保存"}</button></>}>
       <form id="tenant-form" onSubmit={saveTenant} className="edit-form">
-        {dialog === "addTenant" && <div className="curl-import-entry"><button type="button" className="outline-button compact" onClick={() => { setNotice(""); setDialog("curlImport"); }}><FileUp size={17} />从 cURL 导入</button></div>}
+        {dialog === "addTenant" && <div className="curl-import-entry">
+          <button type="button" className="outline-button compact" onClick={() => { setNotice(""); setDialog("curlImport"); }}><FileUp size={17} />从 cURL 导入</button>
+          <button type="button" className="outline-button compact" onClick={openTenantImport}><FileUp size={17} />从 Excel 批量导入</button>
+        </div>}
         <Field label="租户名称" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required />
         <Field label="企业 ID" value={form.corporationId} onChange={(event) => setForm({ ...form, corporationId: event.target.value })} placeholder="留空后自动获取" />
         <label className="field"><span>部署方式</span><select value={form.deployment} onChange={(event) => setForm({ ...form, deployment: event.target.value, baseUrl: event.target.value === "saas" ? SAAS_DEFAULT_ORIGIN : form.baseUrl })}><option value="saas">SaaS</option><option value="onPrem">本地化</option></select></label>
@@ -374,36 +758,117 @@ export function App() {
       </div>
     </Modal>}
 
-    {(dialog === "addPerson" || dialog === "editPerson" || dialog === "addBatchPerson") && <Modal title={dialog === "addBatchPerson" ? "批量新增人员" : dialog === "addPerson" ? "新增人员" : "编辑人员"} error={notice} onClose={() => setDialog(null)} footer={<><button className="secondary-button" onClick={() => setDialog(null)}>取消</button>{dialog === "editPerson" && <button className="danger-button" onClick={() => setDialog("deletePerson")}><Trash2 size={16} />删除人员</button>}<button className="primary-button" type="submit" form="person-form" disabled={saving || (dialog === "addBatchPerson" && !batchTenantIds.length)}>{saving ? "处理中…" : "保存"}</button></>}>
-      <form id="person-form" className="edit-form" onSubmit={savePerson}>
-        {dialog === "addBatchPerson" ? <div className="field"><span>租户</span><BatchTenantPicker tenants={workspace.tenants} value={batchTenantIds} onChange={setBatchTenantIds} /></div> : <Field label="租户" value={tenant?.name || ""} readOnly />}
-        <Field label="姓名" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="留空后从员工信息自动回填" />
-        <Field label="人员 ID" value={form.staffId} onChange={(event) => setForm({ ...form, staffId: event.target.value })} />
-        <Field label="工号（Code）" value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value })} />
-        <Field label="手机号" type="tel" value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} />
-        <Field label="邮箱" type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} />
-        <p className="form-note">{dialog === "addBatchPerson"
-          ? `保存时会尝试为已选择的 ${batchTenantIds.length} 个租户新增人员。姓名为空时，会分别使用各租户的凭证匹配员工；匹配失败的租户会自动跳过，保存后显示成功和未匹配名单。`
-          : "至少填写人员 ID、工号、手机号或邮箱之一。姓名为空时，保存会根据员工信息自动回填；无人员 ID 时优先按工号查询。"}</p>
+    {(dialog === "addPerson" || dialog === "editPerson" || dialog === "addBatchPerson") && <Modal
+      title={dialog === "addBatchPerson" ? "批量新增人员" : dialog === "addPerson" ? "新增人员" : "编辑人员"}
+      wide={dialog === "addBatchPerson"}
+      error={personImportError || notice}
+      onClose={() => { if (!personImportBusy) setDialog(null); }}
+      footer={<>
+        <button className="secondary-button" onClick={() => setDialog(null)} disabled={personImportBusy}>取消</button>
+        {dialog === "addBatchPerson" && personImportBusy && <button className="secondary-button" type="button" onClick={cancelImport}>中止</button>}
+        {dialog === "editPerson" && <button className="danger-button" onClick={() => setDialog("deletePerson")}><Trash2 size={16} />删除人员</button>}
+        {dialog === "addBatchPerson" && personSource === "file"
+          ? <button className="primary-button" type="button" onClick={runPersonImport} disabled={personImportBusy || !personPlan}>{personImportBusy ? `导入中 ${personImportProgress?.done ?? 0}/${personImportProgress?.total ?? 0}` : "导入"}</button>
+          : <button className="primary-button" type="submit" form="person-form" disabled={saving || (dialog === "addBatchPerson" && !batchTenantIds.length)}>{saving ? "处理中…" : "保存"}</button>}
+      </>}>
+      <form id="person-form" className="edit-form" onSubmit={dialog === "addBatchPerson" && personSource === "file" ? (event) => event.preventDefault() : savePerson}>
+        {dialog === "addBatchPerson" ? <>
+          <div className="field"><span>租户</span><BatchTenantPicker tenants={workspace.tenants} value={batchTenantIds} onChange={setBatchTenantIds} /></div>
+          <div className="import-source-tabs" role="tablist" aria-label="人员来源">
+            <button type="button" role="tab" aria-selected={personSource === "manual"} className={`import-source-tab${personSource === "manual" ? " active" : ""}`} onClick={() => setPersonSource("manual")}>手动填写</button>
+            <button type="button" role="tab" aria-selected={personSource === "file"} className={`import-source-tab${personSource === "file" ? " active" : ""}`} onClick={() => setPersonSource("file")}>从 Excel 导入</button>
+          </div>
+          {personSource === "file"
+            ? <div className="import-panel">
+              <div className="import-file-row">
+                <button type="button" className="outline-button compact" onClick={downloadPersonTemplate}><Download size={17} />下载导入模板</button>
+                <button type="button" className="outline-button compact" onClick={() => personFileInput.current?.click()}><FileUp size={17} />选择 Excel 文件</button>
+                {personFileName && <span className="import-file-name" title={personFileName}>{personFileName}</span>}
+              </div>
+              <p className="form-note">表格列为姓名、人员 ID、工号、手机号、邮箱。第 2 行示例数据会自动跳过；无论是否填写姓名，导入都会用所选租户的凭据逐个查询人员 ID，查不到或与表格填写不一致的行会失败。一次最多 {PERSON_IMPORT_LIMIT} 行。</p>
+              {personPlan && <PersonImportPreview plan={personPlan} selectedTenantCount={batchTenantIds.length} busy={personImportBusy} progress={personImportProgress} />}
+            </div>
+            : <>
+              <PersonFields form={form} onChange={setForm} />
+              <p className="form-note">{`保存时会尝试为已选择的 ${batchTenantIds.length} 个租户新增人员。姓名为空时，会分别使用各租户的凭证匹配员工；匹配失败的租户会自动跳过，保存后显示成功和未匹配名单。`}</p>
+            </>}
+        </> : <>
+          <Field label="租户" value={tenant?.name || ""} readOnly />
+          <PersonFields form={form} onChange={setForm} />
+          <p className="form-note">至少填写人员 ID、工号、手机号或邮箱之一。姓名为空时，保存会根据员工信息自动回填；无人员 ID 时优先按工号查询。</p>
+        </>}
       </form>
     </Modal>}
 
-    {dialog === "globalPersonResult" && batchResult && <Modal title="批量新增结果" onClose={() => { setBatchResult(null); setDialog(null); }} footer={<button className="secondary-button" onClick={() => { setBatchResult(null); setDialog(null); }}>关闭</button>}>
+    {dialog === "tenantImport" && <Modal title="从 Excel 导入租户" wide error={tenantImportError} onClose={() => { if (!tenantImportBusy) setDialog("addTenant"); }} footer={<>
+      <button className="secondary-button" type="button" onClick={() => setDialog("addTenant")} disabled={tenantImportBusy}>返回</button>
+      {tenantImportBusy && <button className="secondary-button" type="button" onClick={cancelImport}>中止</button>}
+      <button className="primary-button" type="button" onClick={runTenantImport} disabled={tenantImportBusy || !tenantPlan}>{tenantImportBusy ? `导入中 ${tenantImportProgress?.done ?? 0}/${tenantImportProgress?.total ?? 0}` : "开始导入"}</button>
+    </>}>
+      <div className="import-panel">
+        <div className="import-file-row">
+          <button type="button" className="outline-button compact" onClick={downloadTenantTemplate}><Download size={17} />下载导入模板</button>
+          <button type="button" className="outline-button compact" onClick={() => tenantFileInput.current?.click()}><FileUp size={17} />选择 Excel 文件</button>
+          {tenantFileName && <span className="import-file-name" title={tenantFileName}>{tenantFileName}</span>}
+        </div>
+        <p className="form-note">表格列为租户名称、域名、appKey、appSecurity；第 2 行示例数据会自动跳过，域名留空时使用内置 SaaS 地址。导入时会逐个调用授权接口获取企业 ID，一次最多 {TENANT_IMPORT_LIMIT} 行。</p>
+        {tenantPlan && <TenantImportPreview plan={tenantPlan} busy={tenantImportBusy} progress={tenantImportProgress} />}
+      </div>
+    </Modal>}
+
+    {dialog === "tenantImportResult" && tenantResult && <Modal title="导入租户结果" onClose={() => { if (!tenantImportBusy) setDialog("addTenant"); }} footer={<>
+      {tenantResult.retryItems?.length ? <button className="secondary-button" type="button" onClick={retryTenantImport} disabled={tenantImportBusy}>{tenantImportBusy ? "重试中…" : `授权并重试（${tenantResult.retryItems.length} 行）`}</button> : null}
+      <button className="secondary-button" type="button" onClick={() => copyFailures(failureText([...tenantResult.failed, ...tenantResult.invalid]))} disabled={!tenantResult.failed.length && !tenantResult.invalid.length}>{copiedList ? "已复制" : "复制未导入清单"}</button>
+      <button className="primary-button" type="button" onClick={() => setDialog("addTenant")} disabled={tenantImportBusy}>完成</button>
+    </>}>
+      {tenantImportError && <p className="modal-error" role="alert">{tenantImportError}</p>}
       <div className="global-result-summary">
-        <p>成功 <strong>{batchResult.succeeded.length}</strong> 个租户，未匹配 <strong>{batchResult.failed.length}</strong> 个租户。</p>
+        <p>新增 <strong>{tenantResult.added.length}</strong> 个租户，更新 <strong>{tenantResult.updated.length}</strong> 个，未导入 <strong>{tenantResult.failed.length + tenantResult.invalid.length}</strong> 行{tenantResult.aborted ? "（已中止，已完成部分已保存）" : ""}。</p>
         <section className="global-result-section">
-          <h3>成功租户（{batchResult.succeeded.length}）</h3>
-          {batchResult.succeeded.length
-            ? <ul className="global-result-list">{batchResult.succeeded.map((item) => <li key={item.tenantId}>{item.tenantName}</li>)}</ul>
+          <h3>新增租户（{tenantResult.added.length}）</h3>
+          {tenantResult.added.length
+            ? <ul className="global-result-list">{tenantResult.added.map((item) => <li key={item.id}>第 {item.rowNumber} 行 · {item.name}</li>)}</ul>
+            : <p className="form-note">无</p>}
+        </section>
+        <section className="global-result-section">
+          <h3>更新租户（{tenantResult.updated.length}）</h3>
+          {tenantResult.updated.length
+            ? <ul className="global-result-list">{tenantResult.updated.map((item) => <li key={item.id}>第 {item.rowNumber} 行 · {item.name}</li>)}</ul>
             : <p className="form-note">无</p>}
         </section>
         <section className="global-result-section global-result-failed">
-          <h3>未匹配租户（{batchResult.failed.length}）</h3>
-          {batchResult.failed.length
-            ? <ul className="global-result-list">{batchResult.failed.map((item) => <li key={item.tenantId}><strong>{item.tenantName}</strong><span>{item.error}</span></li>)}</ul>
+          <h3>未导入（{tenantResult.failed.length + tenantResult.invalid.length}）</h3>
+          {tenantResult.failed.length + tenantResult.invalid.length
+            ? <ul className="global-result-list">{[...tenantResult.failed, ...tenantResult.invalid].map((item) => <li key={`${item.rowNumber}-${item.error}`}><strong>第 {item.rowNumber} 行 {item.name || ""}</strong><span>{item.error}</span></li>)}</ul>
             : <p className="form-note">无</p>}
         </section>
       </div>
+    </Modal>}
+
+    {dialog === "globalPersonResult" && batchResult && <Modal
+      title={batchResult.results ? "导入人员结果" : "批量新增结果"}
+      onClose={() => { setBatchResult(null); setDialog(null); }}
+      footer={<>
+        {batchResult.results ? <button className="secondary-button" type="button" onClick={() => copyFailures(personFailureText)} disabled={!personFailureText}>{copiedList ? "已复制" : "复制失败清单"}</button> : <button className="secondary-button" onClick={() => { setBatchResult(null); setDialog(null); }}>关闭</button>}
+        {batchResult.results && <button className="primary-button" type="button" onClick={() => { setBatchResult(null); setDialog(null); }}>完成</button>}
+      </>}>
+      {batchResult.results
+        ? <PersonResultBody result={batchResult} />
+        : <div className="global-result-summary">
+          <p>成功 <strong>{batchResult.succeeded.length}</strong> 个租户，未匹配 <strong>{batchResult.failed.length}</strong> 个租户。</p>
+          <section className="global-result-section">
+            <h3>成功租户（{batchResult.succeeded.length}）</h3>
+            {batchResult.succeeded.length
+              ? <ul className="global-result-list">{batchResult.succeeded.map((item) => <li key={item.tenantId}>{item.tenantName}</li>)}</ul>
+              : <p className="form-note">无</p>}
+          </section>
+          <section className="global-result-section global-result-failed">
+            <h3>未匹配租户（{batchResult.failed.length}）</h3>
+            {batchResult.failed.length
+              ? <ul className="global-result-list">{batchResult.failed.map((item) => <li key={item.tenantId}><strong>{item.tenantName}</strong><span>{item.error}</span></li>)}</ul>
+              : <p className="form-note">无</p>}
+          </section>
+        </div>}
     </Modal>}
 
     {(dialog === "deleteTenant" || dialog === "deletePerson") && <Modal title={dialog === "deleteTenant" ? "删除租户" : "删除人员"} onClose={() => setDialog(null)} footer={<><button className="secondary-button" onClick={() => setDialog(null)}>取消</button><button className="danger-button solid" onClick={remove}>确认删除</button></>}><p>将删除{dialog === "deleteTenant" ? `租户“${tenant.name}”及其全部人员` : `人员“${personToDelete?.name}”`}，此操作无法撤销。</p></Modal>}

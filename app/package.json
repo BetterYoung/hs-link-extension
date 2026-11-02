@@ -1,16 +1,17 @@
 {
   "name": "xiaoyi-link-extension",
-  "version": "1.4.3",
+  "version": "1.6.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test tests/workspace.test.mjs tests/openapi.test.mjs tests/popup.test.mjs tests/settings.test.mjs tests/tenant-ops.test.mjs"
+    "test": "node --test tests/workspace.test.mjs tests/openapi.test.mjs tests/popup.test.mjs tests/settings.test.mjs tests/tenant-ops.test.mjs tests/xlsx.test.mjs tests/import-tenants.test.mjs tests/import-people.test.mjs tests/lookup-person.test.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "5.0.4",
+    "fflate": "^0.8.3",
     "lucide-react": "^1.20.0",
     "react": "19.2.0",
     "react-dom": "19.2.0",

@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileUp, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 const maskPhone = (phone) => phone?.length >= 7 ? `${phone.slice(0, 3)}****${phone.slice(-4)}` : phone || "—";
 const PAGE_SIZE = 10;
 
-export function PeopleView({ tenant, selectedPersonId, query, onQueryChange, onAdd, onEdit, onDelete }) {
+export function PeopleView({ tenant, selectedPersonId, query, onQueryChange, onAdd, onImport, onEdit, onDelete }) {
   const [page, setPage] = useState(1);
   const people = tenant?.people ?? [];
   const term = query.trim().toLocaleLowerCase();
@@ -31,7 +31,7 @@ export function PeopleView({ tenant, selectedPersonId, query, onQueryChange, onA
   return <div className="people-management-panel">
     <div className="people-toolbar">
       <label className="people-search"><Search size={19} aria-hidden="true" /><input value={query} onChange={(event) => changeQuery(event.target.value)} placeholder="搜索姓名、人员 ID、工号、手机号或邮箱" aria-label="搜索人员" /></label>
-      <div className="people-toolbar-actions"><span>共 {people.length} 人</span><button className="primary-button compact" onClick={onAdd}><Plus size={18} />新增人员</button></div>
+      <div className="people-toolbar-actions"><span>共 {people.length} 人</span><button className="outline-button compact" onClick={onImport} title="从 Excel 批量导入人员"><FileUp size={18} />导入人员</button><button className="primary-button compact" onClick={onAdd}><Plus size={18} />新增人员</button></div>
     </div>
     <div className="people-table" role="table" aria-label={`${tenant.name}的人员`}>
       <div className="people-table-head" role="row"><span role="columnheader">姓名</span><span role="columnheader">人员 ID</span><span role="columnheader">工号</span><span role="columnheader">手机号</span><span role="columnheader">邮箱</span><span role="columnheader">操作</span></div>

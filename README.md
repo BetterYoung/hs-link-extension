@@ -40,6 +40,14 @@ Windows 和 macOS 的操作相同；Chrome 和 Edge 的操作也相同。
 
 在 `app` 目录执行 `npm install && npm run build`，然后在扩展管理页加载 `app/dist/client`。
 
+> [!IMPORTANT]
+> 加载时**务必选到 `app/dist/client` 这一层**（完整路径为 `hs-link-extension/app/dist/client`）。
+> 仓库根目录 `hs-link-extension`、`app`、`app/dist` 这几层都**没有 `manifest.json`**，
+> 选错层级浏览器会报“清单文件缺失或不可读取 / 无法加载清单”。
+> 判断标准：所选目录的第一层必须能直接看到 `manifest.json`、`popup.html`、`index.html` 和 `icons/`。
+>
+> 重新执行 `npm run build` 后，产物内的资源文件名哈希会变化，需回到扩展管理页点该扩展的“重新加载”才会生效。
+
 ## 使用
 
 > 工具栏弹窗右上角提供“批量新增”入口，可搜索并选择一个或多个租户后快捷添加人员，无需进入设置页。

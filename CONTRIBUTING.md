@@ -9,7 +9,7 @@
 
 ```bash
 git clone https://github.com/BetterYoung/hs-link-extension.git
-cd hs-link/app
+cd hs-link-extension/app
 npm install
 npm test        # 单元测试（node --test）
 npm run build   # 产出 app/dist/client
@@ -17,7 +17,7 @@ npm run build   # 产出 app/dist/client
 
 在浏览器扩展管理页开启「开发者模式」，选择「加载已解压的扩展」，指向 `app/dist/client` 即可本地调试。
 
-接手前建议先读 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（模块职责、数据模型、调用链与不变量）与 `app/AGENTS.md`（行为约定）。
+接手前建议先读 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（模块职责、数据模型、调用链与不变量）与 `app/AGENTS.md`（行为约定）。
 
 > `app/dist/client` 是**随仓库提交**的构建产物，CI 会校验它与源码一致：改完源码请一并重新构建并提交。
 
@@ -29,13 +29,14 @@ app/
     PopupApp.jsx   工具栏弹窗：租户/人员选择、生成、复制、打开链接
     App.jsx        设置页：租户、人员、批量新增、导入导出
     PeopleView.jsx 人员列表：分页、搜索、邮箱列
+    config.js      SaaS 入口与备份格式常量
     model.js       数据模型：校验、存储、备份解析、人员补齐
     openapi.js     OpenAPI 调用：授权、员工匹配、cURL 解析
     tenantOps.js   按人员 ID 去重、跨租户批量解析（不依赖 React）
   tests/           单元测试
   public/          manifest.json 与图标
   dist/client/     可加载的扩展产物
-release/           发布目录与分发包
+release/           手工发版时生成的打包目录（不纳入版本库）
 ```
 
 ## 提交前请确认
@@ -130,7 +131,7 @@ gh release create vX.Y.Z "release/hs-link-vX.Y.Z.zip" --title "vX.Y.Z" --notes-f
 | `单元测试` | 用例失败 | 本地 `npm test` 复现并修复 |
 | `构建扩展` | 源码存在语法或引用错误 | 本地 `npm run build` 复现 |
 | `校验构建产物与仓库一致` | 改了源码但没提交构建产物 | 执行 `npm run build` 并提交 `app/dist/client` |
-| `校验发布包与 manifest 版本一致` | 改了版本号但没重新打包 | 按第 5 步重新打包并提交 |
+| `校验版本号一致` | `app/public/manifest.json` 与 `app/package.json` 的版本号不同 | 把两处改成同一个版本号后提交 |
 
 ## 行为约定（改动前请先读 `app/AGENTS.md`）
 

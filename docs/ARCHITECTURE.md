@@ -14,13 +14,19 @@
 
 | 文件 | 职责 |
 | --- | --- |
+| `app/src/config.js` | 部署形态与备份格式常量：SaaS 入口地址、备份标识与旧格式兼容判定 |
 | `app/src/model.js` | 数据模型：字段校验、租户/人员规范化、`chrome.storage.local` 读写、备份导出与解析、人员信息补齐 |
-| `app/src/openapi.js` | HS OpenAPI 调用：域名授权、租户授权、员工匹配、cURL 解析、链接生成 |
-| `app/src/tenantOps.js` | 按人员 ID（`staffId`）去重的 upsert、跨租户批量匹配（不依赖 React，便于单元测试） |
-| `app/src/App.jsx` | 设置页：租户与人员管理、批量新增、cURL 导入、导入导出 |
-| `app/src/PopupApp.jsx` | 弹窗：租户/人员可搜索下拉、批量新增、生成/复制/打开链接 |
-| `app/src/PeopleView.jsx` | 人员表：每页 10 人、搜索（姓名/人员 ID/工号/手机号/邮箱）、邮箱列、编辑删除 |
-| `app/tests/*.test.mjs` | `node --test` 单元测试，覆盖模型、接口、设置页、弹窗与批量逻辑 |
+| `app/src/lookupPerson.js` | 弹窗人员在线查询：查询值归一化（手机号去分隔符、邮箱忽略大小写）、本地精确匹配、接口结果合并（按 staffId 复用并覆盖、保留记录 ID）；不依赖 React |
+| `app/src/openapi.js` | HS OpenAPI 调用：域名授权、租户授权、员工匹配、cURL 解析、链接生成、按租户缓存的授权会话（`createTenantAuthorizer`）与批量域名授权 |
+| `app/src/tenantOps.js` | 按人员 ID（`staffId`）去重的 upsert、跨租户批量匹配、`savePeopleToTenants`（单人 × 多租户的统一写入链路，不依赖 React，便于单元测试） |
+| `app/src/xlsx.js` | 极简 xlsx 读写：ZIP + XML（`fflate`），生成模板、读取首个工作表、标记数值单元格；不依赖 DOM，可在 `node --test` 中运行 |
+| `app/src/importTenants.js` | 租户 Excel 导入：表头别名、逐行校验与状态（新增/更新/跳过/错误）、按企业 ID 合并、租户模板 |
+| `app/src/importPeople.js` | 人员 Excel 导入：表头别名、逐行校验与状态、数值列提示、人员模板 |
+| `app/src/App.jsx` | 设置页：租户与人员管理、批量新增、cURL 导入、Excel 导入、备份导入导出 |
+| `app/src/PopupApp.jsx` | 弹窗：租户/人员可搜索下拉、按维度在线查询并保存人员、生成/复制/打开链接 |
+| `app/src/PeopleView.jsx` | 人员表：每页 10 人、搜索（姓名/人员 ID/工号/手机号/邮箱）、邮箱列、编辑删除、导入人员入口 |
+| `app/src/ImportPreview.jsx` | 导入预览表：渲染行号、字段与状态/错误提示，供租户与人员导入共用 |
+| `app/tests/*.test.mjs` | `node --test` 单元测试，覆盖模型、接口、设置页、弹窗、批量逻辑与 Excel 导入 |
 
 ## 3. 数据模型
 
@@ -63,6 +69,27 @@ workspace
 设置页/弹窗「保存人员」
   └─ 姓名为空 → resolveStaff(tenant, person) → 回填姓名与空白字段
        └─ upsertPerson(people, person) → 同租户内按 staffId 去重
+
+设置页「从 Excel 导入租户」
+  └─ readSheets(file) → planTenantImport(rows) → 预览新增/更新/跳过/错误
+       ├─ requestOriginPermissions(域名列表)（一次批量申请）
+       ├─ 逐行 authorizeTenant(item) → 回填企业 ID
+       └─ mergeTenantImport(workspace, executed) → 按 corporationId 合并，保留人员与记录 ID
+
+设置页「从 Excel 导入人员」
+  └─ readSheets(file) → planPersonImport(rows) → 预览写入行与跳过/错误（自动跳过第 2 行示例）
+       └─ savePeopleToTenants(租户列表, forms, { alwaysResolve: true })
+            ├─ 每行无论姓名是否填写，都用所选租户的凭证查询人员 ID
+            ├─ 查不到人员 ID，或表格中的 ID 与查询结果不一致 → 该租户记为失败
+            └─ 每行一个人：同一记录 ID 写入所有租户
+
+弹窗「按维度在线查询人员」
+  └─ validateLookupValue(dimension, value) → findLocalMatches(当前租户)
+       ├─ 本地精确命中 → 直接选中，不调用接口
+       └─ 未命中 → requestOriginPermission(租户域名)
+            └─ resolveStaff(tenant, { STAFFID | CODE | CELLPHONE | MAIL })
+                 └─ mergeResolvedPerson → 按 staffId、工号、手机号、邮箱复用本地记录
+                      └─ 保留记录 ID，接口返回的字段覆盖，未返回的字段保留本地值
 ```
 
 要点：
@@ -73,7 +100,7 @@ workspace
 
 ## 5. 不变量（改动前务必确认）
 
-1. 设置页只做租户、人员、备份管理；链接生成只在弹窗。
+1. 设置页负责租户、人员、备份与导入管理；弹窗只读选择，并在在线查询命中后按需写入人员；链接生成只在弹窗。
 2. 凭据只存 `chrome.storage.local`，界面默认遮蔽；不引入主密码或加密方案。
 3. 人员四维度互补；缺项时按 STAFFID → CODE → CELLPHONE → MAIL 查询，且**只补空白、不覆盖**已有值。
 4. 同一租户内 `staffId` 唯一：保存已存在的 `staffId` 更新该条并**保留其记录 ID**；历史重复项在读取/保存时去重并保留最后一条。
@@ -82,6 +109,10 @@ workspace
 7. 人员列表每页 10 人，搜索与切换租户后回到对应页。
 8. 每次扩展调用的目标域名都需要用户授权；权限按源申请，不预取。
 9. 扩展没有服务端，仓库内不出现真实凭据、备份文件或访问链接。
+10. Excel 导入只做**增量合并**：租户按企业 ID 新增或更新（保留人员与记录 ID），人员按 `staffId` 去重写入；任何导入都不得整体替换本地资料。
+11. 导入单文件最多 100 行，先预览再执行；模板第 2 行是固定示例，规划函数按整行匹配自动跳过（改过的示例行按真实数据导入）。模板对人员 ID、工号、手机号等列使用文本格式，导入时对已被 Excel 转成数值的列给出提示或拦截。导入不新增 manifest 权限，域名授权仍在执行时按需申请。
+12. 弹窗人员行右侧有独立的查询按钮，点击直接打开按维度查询面板（人员 ID、工号、手机号、邮箱、姓名）；本地优先、仅作用于当前选中租户；点击「查询」即完成查询、保存与选中。接口结果复用同一条本地记录（保留记录 ID），接口返回的字段直接覆盖，未返回的字段保留本地值。姓名只做本地模糊搜索，不发起接口查询。
+13. 弹窗与设置页都监听 `chrome.storage.onChanged`：弹窗写前重读存储，设置页在对话框关闭时应用外部数据，避免两边用旧快照互相覆盖。
 
 > 已知行为（非缺陷）：弹窗生成链接时，只要人员资料缺少 `email` 也会触发一次员工查询。若要收紧为"仅缺 `staffId` 才查询"，需作为独立版本改动并同步更新测试。
 
@@ -92,6 +123,7 @@ workspace
 | 新增人员维度 / 新接口 | `app/src/openapi.js`（同步 `app/src/model.js` 的字段与校验） |
 | 新增数据字段 | `app/src/model.js`（校验 + 备份兼容），再改 `PeopleView.jsx` / `App.jsx` 展示 |
 | 新的批量场景 | `app/src/tenantOps.js`（保持与 React 解耦，便于测试） |
+| 导入表格增删列 / 改别名 | `app/src/importTenants.js` 或 `app/src/importPeople.js` 的表头别名与模板定义，并补 `app/tests` 用例 |
 | 新界面 | `app/src/App.jsx` 或 `app/src/PopupApp.jsx`，并补 `app/src/styles.css` / `popup.css` 对应类名 |
 | 新校验规则 | 在 `model.js` 的 `normalize*` 中收紧，并同步补 `app/tests` 用例 |
 
