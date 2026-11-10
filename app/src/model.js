@@ -190,6 +190,12 @@ export async function loadWorkspace() {
   throw new Error("请从 Chrome/Edge 扩展页面打开此工具");
 }
 
+export async function prepareBackupImport(mode, backup, load = loadWorkspace) {
+  if (mode === "replace") return normalizeWorkspace(backup);
+  if (mode === "merge") return mergeBackup(await load(), backup);
+  throw new Error("导入方式不正确");
+}
+
 export async function saveWorkspace(workspace) {
   const normalized = normalizeWorkspace(workspace);
   const storage = globalThis.chrome?.storage?.local;

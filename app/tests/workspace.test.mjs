@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyResolvedPerson, applyResolvedStaffId, BACKUP_FORMAT, createBackup, mergeBackup, normalizeOrigin, normalizePerson, normalizeTenant, normalizeWorkspace, parseBackup } from "../src/model.js";
+import { applyResolvedPerson, applyResolvedStaffId, BACKUP_FORMAT, createBackup, mergeBackup, normalizeOrigin, normalizePerson, normalizeTenant, normalizeWorkspace, parseBackup, prepareBackupImport } from "../src/model.js";
 
 const workspace = {
   schemaVersion: 1,
@@ -11,6 +11,16 @@ const workspace = {
   }],
   selectedTenantId: "t1", selectedPersonId: "p1",
 };
+
+test("损坏的本地资料可用有效备份覆盖恢复，但不能增量合并", async () => {
+  let calls = 0;
+  const brokenLoad = async () => { calls += 1; throw new Error("本地资料损坏"); };
+  assert.deepEqual(await prepareBackupImport("replace", workspace, brokenLoad), normalizeWorkspace(workspace));
+  assert.equal(calls, 0);
+  await assert.rejects(prepareBackupImport("merge", workspace, brokenLoad), /本地资料损坏/);
+  assert.equal(calls, 1);
+  await assert.rejects(prepareBackupImport("other", workspace, brokenLoad), /导入方式不正确/);
+});
 
 test("增量合并按企业 ID 和人员 ID 匹配，保留本地值并补充资料", () => {
   const local = structuredClone(workspace);

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, Eye, EyeOff, FileUp, Pencil, Plus, Search, Trash2, X } from "lucide-react";
-import { createBackup, emptyWorkspace, loadWorkspace, mergeBackup, normalizePerson, normalizeTenant, parseBackup, saveWorkspace, STORAGE_KEY } from "./model.js";
+import { createBackup, emptyWorkspace, loadWorkspace, normalizePerson, normalizeTenant, parseBackup, prepareBackupImport, saveWorkspace, STORAGE_KEY } from "./model.js";
 import { authorizeTenant, createTenantAuthorizer, parseCurlCommand, requestOriginPermissions, resolveStaff } from "./openapi.js";
 import { PeopleView } from "./PeopleView.jsx";
 import { ImportPreview } from "./ImportPreview.jsx";
@@ -688,8 +688,7 @@ export function App() {
     setBackupImportBusy(true);
     try {
       await writeQueue.current.catch(() => {});
-      const current = await loadWorkspace();
-      const next = backupImportMode === "merge" ? mergeBackup(current, pendingImport) : pendingImport;
+      const next = await prepareBackupImport(backupImportMode, pendingImport);
       const saved = await saveWorkspace(next);
       setExternalWorkspace(null);
       setWorkspace(saved);
