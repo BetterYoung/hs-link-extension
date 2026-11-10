@@ -138,6 +138,45 @@ export function parseBackup(json) {
   return normalizeWorkspace(parsed);
 }
 
+// 合并只补充资料；无法可靠判定身份时停止，避免静默覆盖。
+export function mergeBackup(current, backup) {
+  const local = normalizeWorkspace(current);
+  const incoming = normalizeWorkspace(backup);
+  const assertUniqueCorporations = (tenants) => {
+    if (new Set(tenants.map((item) => item.corporationId)).size !== tenants.length) {
+      throw new Error("存在重复企业 ID，无法安全合并，请先整理租户资料");
+    }
+  };
+  assertUniqueCorporations(local.tenants);
+  assertUniqueCorporations(incoming.tenants);
+  const tenants = local.tenants.map((tenant) => ({ ...tenant, people: tenant.people.map((person) => ({ ...person })) }));
+  for (const source of incoming.tenants) {
+    const byCorp = tenants.findIndex((item) => item.corporationId === source.corporationId);
+    const byId = tenants.findIndex((item) => item.id === source.id);
+    if (byId !== -1 && byId !== byCorp) throw new Error("租户记录 ID 对应不同企业，无法安全合并");
+    if (byCorp === -1) {
+      tenants.push(source);
+      continue;
+    }
+    const target = tenants[byCorp];
+    for (const person of source.people) {
+      const byPersonId = target.people.findIndex((item) => item.id === person.id);
+      const byStaffId = person.staffId ? target.people.findIndex((item) => item.staffId === person.staffId) : -1;
+      if ((byPersonId !== -1 && byStaffId !== -1 && byPersonId !== byStaffId) ||
+          (byPersonId !== -1 && target.people[byPersonId].staffId && person.staffId && target.people[byPersonId].staffId !== person.staffId)) {
+        throw new Error(`租户“${target.name}”存在人员 ID 冲突，无法安全合并`);
+      }
+      const index = byStaffId !== -1 ? byStaffId : byPersonId;
+      if (index === -1) target.people.push(person);
+      else {
+        const existing = target.people[index];
+        target.people[index] = { ...existing, code: existing.code || person.code, phone: existing.phone || person.phone, email: existing.email || person.email, staffId: existing.staffId || person.staffId };
+      }
+    }
+  }
+  return normalizeWorkspace({ ...local, tenants });
+}
+
 export async function loadWorkspace() {
   const storage = globalThis.chrome?.storage?.local;
   if (storage) {
@@ -149,6 +188,12 @@ export async function loadWorkspace() {
     return saved ? normalizeWorkspace(JSON.parse(saved)) : demoWorkspace();
   }
   throw new Error("请从 Chrome/Edge 扩展页面打开此工具");
+}
+
+export async function prepareBackupImport(mode, backup, load = loadWorkspace) {
+  if (mode === "replace") return normalizeWorkspace(backup);
+  if (mode === "merge") return mergeBackup(await load(), backup);
+  throw new Error("导入方式不正确");
 }
 
 export async function saveWorkspace(workspace) {

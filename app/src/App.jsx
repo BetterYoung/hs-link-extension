@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, Eye, EyeOff, FileUp, Pencil, Plus, Search, Trash2, X } from "lucide-react";
-import { createBackup, emptyWorkspace, loadWorkspace, normalizePerson, normalizeTenant, parseBackup, saveWorkspace, STORAGE_KEY } from "./model.js";
+import { createBackup, emptyWorkspace, loadWorkspace, normalizePerson, normalizeTenant, parseBackup, prepareBackupImport, saveWorkspace, STORAGE_KEY } from "./model.js";
 import { authorizeTenant, createTenantAuthorizer, parseCurlCommand, requestOriginPermissions, resolveStaff } from "./openapi.js";
 import { PeopleView } from "./PeopleView.jsx";
 import { ImportPreview } from "./ImportPreview.jsx";
@@ -187,6 +187,8 @@ export function App() {
   const [form, setForm] = useState(null);
   const [showPassword, setShowPassword] = useState(false);
   const [pendingImport, setPendingImport] = useState(null);
+  const [backupImportMode, setBackupImportMode] = useState("merge");
+  const [backupImportBusy, setBackupImportBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [curlText, setCurlText] = useState("");
   const [batchResult, setBatchResult] = useState(null);
@@ -673,6 +675,7 @@ export function App() {
     try {
       if (file.size > 5 * 1024 * 1024) throw new Error("备份文件不能超过 5 MB");
       setPendingImport(parseBackup(await file.text()));
+      setBackupImportMode("merge");
       setDialog("import");
       setNotice("");
     } catch (error) {
@@ -680,12 +683,25 @@ export function App() {
     }
   }
 
-  function confirmImport() {
-    persist(pendingImport);
-    setTenantQuery("");
-    setPeopleQuery("");
-    setPendingImport(null);
-    setDialog(null);
+  async function confirmImport() {
+    if (backupImportBusy) return;
+    setBackupImportBusy(true);
+    try {
+      await writeQueue.current.catch(() => {});
+      const next = await prepareBackupImport(backupImportMode, pendingImport);
+      const saved = await saveWorkspace(next);
+      setExternalWorkspace(null);
+      setWorkspace(saved);
+      setTenantQuery("");
+      setPeopleQuery("");
+      setPendingImport(null);
+      setNotice("");
+      setDialog(null);
+    } catch (error) {
+      setNotice(`导入失败：${error.message}`);
+    } finally {
+      setBackupImportBusy(false);
+    }
   }
 
   if (!workspace) return <main className="loading">正在读取本地资料…</main>;
@@ -876,12 +892,18 @@ export function App() {
     {dialog === "backup" && <Modal title="导入 / 导出" onClose={() => setDialog(null)} footer={<button className="secondary-button" onClick={() => setDialog(null)}>关闭</button>}>
       <div className="backup-actions">
         <div><h3>导出完整资料</h3><p>备份包含所有租户、人员以及<strong>明文接入密码</strong>。请妥善保存，不要通过公开渠道传输。</p><button className="outline-button" onClick={() => setDialog("export")}><Download size={17} />导出 JSON</button></div>
-        <div><h3>从备份导入</h3><p>选择此前导出的 JSON 文件。校验后预览数量，确认后整体替换当前资料。</p><button className="outline-button" onClick={() => { setDialog(null); fileInput.current?.click(); }}><FileUp size={17} />选择 JSON</button></div>
+        <div><h3>从备份导入</h3><p>选择此前导出的 JSON 文件，校验后可选择增量合并或覆盖导入。</p><button className="outline-button" onClick={() => { setDialog(null); fileInput.current?.click(); }}><FileUp size={17} />选择 JSON</button></div>
       </div>
     </Modal>}
 
     {dialog === "export" && <Modal title="确认导出明文备份" onClose={() => setDialog("backup")} footer={<><button className="secondary-button" onClick={() => setDialog("backup")}>取消</button><button className="primary-button" onClick={exportBackup}>我已了解，导出</button></>}><p>文件包含 {workspace.tenants.length} 个租户的接入账号和<strong>明文密码</strong>。备份不包含授权 token 或生成过的访问链接。</p></Modal>}
 
-    {dialog === "import" && pendingImport && <Modal title="确认替换本地资料" onClose={() => { setPendingImport(null); setDialog(null); }} footer={<><button className="secondary-button" onClick={() => { setPendingImport(null); setDialog(null); }}>取消</button><button className="danger-button solid" onClick={confirmImport}>整体替换</button></>}><p>备份中有 <strong>{pendingImport.tenants.length} 个租户</strong>、<strong>{pendingImport.tenants.reduce((count, item) => count + item.people.length, 0)} 个人员</strong>。确认后将替换当前 {workspace.tenants.length} 个租户及其资料，无法自动撤销。</p></Modal>}
+    {dialog === "import" && pendingImport && <Modal title="选择 JSON 导入方式" error={notice} onClose={() => { if (!backupImportBusy) { setPendingImport(null); setDialog(null); } }} footer={<><button className="secondary-button" disabled={backupImportBusy} onClick={() => { setPendingImport(null); setDialog(null); }}>取消</button><button className={backupImportMode === "replace" ? "danger-button solid" : "primary-button"} disabled={backupImportBusy} onClick={confirmImport}>{backupImportBusy ? "导入中…" : backupImportMode === "replace" ? "确认覆盖导入" : "确认增量合并"}</button></>}>
+      <p>备份中有 <strong>{pendingImport.tenants.length} 个租户</strong>、<strong>{pendingImport.tenants.reduce((count, item) => count + item.people.length, 0)} 个人员</strong>。</p>
+      <fieldset className="backup-import-modes"><legend>导入方式</legend>
+        <label><input type="radio" name="backupImportMode" value="merge" checked={backupImportMode === "merge"} onChange={() => setBackupImportMode("merge")} /> 增量合并</label><p>按企业 ID 匹配租户，按人员 ID 或记录 ID 匹配人员；保留本地已有资料，补充空字段和新增记录。身份冲突时停止导入。</p>
+        <label><input type="radio" name="backupImportMode" value="replace" checked={backupImportMode === "replace"} onChange={() => setBackupImportMode("replace")} /> 覆盖导入</label><p>用备份整体替换当前 {workspace.tenants.length} 个租户及其资料，无法自动撤销。</p>
+      </fieldset>
+    </Modal>}
   </div>;
 }

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyResolvedPerson, applyResolvedStaffId, BACKUP_FORMAT, createBackup, normalizeOrigin, normalizePerson, normalizeTenant, normalizeWorkspace, parseBackup } from "../src/model.js";
+import { applyResolvedPerson, applyResolvedStaffId, BACKUP_FORMAT, createBackup, mergeBackup, normalizeOrigin, normalizePerson, normalizeTenant, normalizeWorkspace, parseBackup, prepareBackupImport } from "../src/model.js";
 
 const workspace = {
   schemaVersion: 1,
@@ -11,6 +11,48 @@ const workspace = {
   }],
   selectedTenantId: "t1", selectedPersonId: "p1",
 };
+
+test("损坏的本地资料可用有效备份覆盖恢复，但不能增量合并", async () => {
+  let calls = 0;
+  const brokenLoad = async () => { calls += 1; throw new Error("本地资料损坏"); };
+  assert.deepEqual(await prepareBackupImport("replace", workspace, brokenLoad), normalizeWorkspace(workspace));
+  assert.equal(calls, 0);
+  await assert.rejects(prepareBackupImport("merge", workspace, brokenLoad), /本地资料损坏/);
+  assert.equal(calls, 1);
+  await assert.rejects(prepareBackupImport("other", workspace, brokenLoad), /导入方式不正确/);
+});
+
+test("增量合并按企业 ID 和人员 ID 匹配，保留本地值并补充资料", () => {
+  const local = structuredClone(workspace);
+  local.tenants[0].people[0].email = "";
+  const backup = structuredClone(workspace);
+  backup.tenants[0].id = "other-tenant-id";
+  backup.tenants[0].appSecurity = "other-secret";
+  backup.tenants[0].people[0].id = "other-person-id";
+  backup.tenants[0].people.push({ id: "p2", name: "New", staffId: "S2", code: "", phone: "", email: "" });
+  backup.tenants.push({ ...structuredClone(workspace.tenants[0]), id: "t2", corporationId: "CORP-2", people: [] });
+  const merged = mergeBackup(local, backup);
+  assert.equal(merged.tenants.length, 2);
+  assert.equal(merged.tenants[0].id, "t1");
+  assert.equal(merged.tenants[0].appSecurity, "test-secret");
+  assert.equal(merged.tenants[0].people[0].id, "p1");
+  assert.equal(merged.tenants[0].people[0].email, "test@example.com");
+  assert.equal(merged.tenants[0].people[1].id, "p2");
+  assert.equal(merged.selectedPersonId, "p1");
+  assert.equal(local.tenants[0].people[0].email, "");
+});
+
+test("增量合并拒绝身份冲突和重复企业 ID", () => {
+  const conflictingTenant = structuredClone(workspace);
+  conflictingTenant.tenants[0].corporationId = "OTHER";
+  assert.throws(() => mergeBackup(workspace, conflictingTenant), /租户记录 ID/);
+  const conflictingPerson = structuredClone(workspace);
+  conflictingPerson.tenants[0].people[0].staffId = "OTHER";
+  assert.throws(() => mergeBackup(workspace, conflictingPerson), /人员 ID 冲突/);
+  const duplicate = structuredClone(workspace);
+  duplicate.tenants.push({ ...duplicate.tenants[0], id: "t2" });
+  assert.throws(() => mergeBackup(workspace, duplicate), /重复企业 ID/);
+});
 
 test("backup preserves tenant/person data and plaintext credentials, but no access links", () => {
   const backup = createBackup({ ...workspace, accessToken: "not-saved", generatedUrl: "not-saved" });
