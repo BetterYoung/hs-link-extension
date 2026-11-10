@@ -8,7 +8,7 @@ A Chrome/Edge Manifest V3 extension that generates HS OpenAPI access links per t
 - **Settings page** — manage tenants, personnel, batch onboarding, Excel import and encrypted-free backups.
 - **No server** — the extension talks to the HS OpenAPI directly from the browser.
 
-Current version: **1.6.0** ([CHANGELOG.md](./CHANGELOG.md))
+Current version: **1.7.0** ([CHANGELOG.md](./CHANGELOG.md))
 
 [![CI](https://github.com/BetterYoung/hs-link-extension/actions/workflows/ci.yml/badge.svg)](https://github.com/BetterYoung/hs-link-extension/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
@@ -59,7 +59,7 @@ Download the ready-to-install package from the [Releases page](https://github.co
 > [!WARNING]
 > Backup files contain the access password **in plaintext**. Treat them like password files: never upload them to public drives, chat groups or repositories. The release ZIP itself contains no tenant data.
 
-Export JSON from **导入 / 导出** in the settings page, then import it on the new machine — the extension validates the file, previews the counts and replaces the local workspace only after confirmation.
+Export JSON from **导入 / 导出** in the settings page, then import it on the new machine. After validation, choose incremental merge or full replacement. Merge matches tenants by enterprise ID and people by personnel ID or record ID, retains existing values, fills blanks and stops on identity conflicts.
 
 ## Build from source
 

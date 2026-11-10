@@ -9,7 +9,7 @@
 [![CI](https://github.com/BetterYoung/hs-link-extension/actions/workflows/ci.yml/badge.svg)](https://github.com/BetterYoung/hs-link-extension/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-当前版本：**1.6.0**（变更记录见 [CHANGELOG.md](./CHANGELOG.md)）
+当前版本：**1.7.0**（变更记录见 [CHANGELOG.md](./CHANGELOG.md)）
 
 ## 目录结构
 
@@ -19,7 +19,7 @@ app/                      扩展源码工程（Vite + React）
   tests/                  单元测试（node --test）
   public/                 manifest.json 与图标（会被复制进扩展目录）
   design/                 品牌主图等设计素材，不进入扩展产物
-  dist/client/            可直接加载的扩展目录（当前为 1.6.0 构建产物）
+  dist/client/            可直接加载的扩展目录（当前为 1.7.0 构建产物）
 docs/                     架构说明（模块职责、数据模型、调用链与不变量）
 ```
 
@@ -112,7 +112,7 @@ Windows 和 macOS 的操作相同；Chrome 和 Edge 的操作也相同。
 1. 完成 [安装](#安装)。
 2. 点击工具栏中的“小合·易联”，进入设置页左侧底部的“导入 / 导出”。
 3. 选择旧电脑导出的 JSON 文件。扩展会校验文件并预览租户、人员数量。
-4. 确认“整体替换”，完成后检查租户和人员资料是否正确。
+4. 选择“增量合并”或“覆盖导入”并确认。增量合并按企业 ID、人员 ID 或记录 ID 匹配，保留本地已有值，补充空字段和新增记录；身份冲突时停止导入。覆盖导入会整体替换本地资料。
 5. 首次生成链接时，按浏览器提示授权对应 API 域名，然后即可继续使用。
 
 ## 开发
