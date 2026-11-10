@@ -17,6 +17,22 @@ test("settings layout uses the selected wider tenant rail", async () => {
   assert.match(styles, /\.sidebar-title-row[^{]*\{[^}]*justify-content:\s*space-between/);
 });
 
+test("切换部署方式时地址联动：SaaS 用内置地址，本地化清空", async () => {
+  const app = await readFile(new URL("../src/App.jsx", import.meta.url), "utf8");
+  assert.match(app, /baseUrl: event\.target\.value === "saas" \? SAAS_DEFAULT_ORIGIN : ""/);
+  assert.match(app, /next\.deployment === "saas"[\s\S]{0,80}baseUrl: SAAS_DEFAULT_ORIGIN/);
+});
+
+test("标签选择器不嵌表单，避免内层 submit 冒泡保存租户", async () => {
+  const picker = await readFile(new URL("../src/TagPicker.jsx", import.meta.url), "utf8");
+  // 内联新建标签曾在租户表单里再套一层 form，submit 冒泡到 saveTenant 会直接保存租户。
+  assert.doesNotMatch(picker, /onSubmit=\{submit\}/);
+  assert.match(picker, /event\.key !== "Enter"/);
+  assert.match(picker, /event\.stopPropagation\(\)/);
+  const app = await readFile(new URL("../src/App.jsx", import.meta.url), "utf8");
+  assert.match(app, /event\.target !== event\.currentTarget/);
+});
+
 test("settings page keeps page scrolling contained and paginates personnel", async () => {
   const peopleSource = await readFile(new URL("../src/PeopleView.jsx", import.meta.url), "utf8");
   const styles = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");

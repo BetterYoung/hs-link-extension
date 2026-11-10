@@ -8,9 +8,17 @@
  */
 
 // SaaS 入口主机名（按片段拼装，运行时还原为实际地址）
-const SAAS_HOST_PARTS = ["app", "ekuai", "bao", "com"];
+const SAAS_HOST_PARTS = ["app", "ekuaibao", "com"];
 
 export const SAAS_ORIGIN = `https://${SAAS_HOST_PARTS.join(".")}`;
+
+/**
+ * 1.8.0 之前的错误默认值：主机名被多拆了一段，拼出来的域名是错的。
+ * 读取旧资料时据此纠正，避免历史 SaaS 租户一直指向不存在的域名。
+ */
+const LEGACY_SAAS_HOST_PARTS = ["app", "ekuai", "bao", "com"];
+
+export const LEGACY_SAAS_ORIGIN = `https://${LEGACY_SAAS_HOST_PARTS.join(".")}`;
 
 /** 判断某个源地址是否为 SaaS 入口 */
 export function isSaasOrigin(origin) {

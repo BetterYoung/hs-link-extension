@@ -5,10 +5,10 @@
 A Chrome/Edge Manifest V3 extension that generates HS OpenAPI access links per tenant and employee — **no local service required**.
 
 - **Toolbar popup** — pick a tenant and a person, then generate / copy / open the access link. The person row also supports local name search and online lookup by personnel ID, code, phone or email.
-- **Settings page** — manage tenants, personnel, batch onboarding, Excel import and encrypted-free backups.
+- **Settings page** — manage tenants, personnel, batch onboarding, Excel import and encrypted-free backups. Tenants can carry coloured tags (e.g. prod / test) from a shared tag library; two or fewer per tenant is recommended, but not enforced.
 - **No server** — the extension talks to the HS OpenAPI directly from the browser.
 
-Current version: **1.7.0** ([CHANGELOG.md](./CHANGELOG.md))
+Current version: **1.8.0** ([CHANGELOG.md](./CHANGELOG.md))
 
 [![CI](https://github.com/BetterYoung/hs-link-extension/actions/workflows/ci.yml/badge.svg)](https://github.com/BetterYoung/hs-link-extension/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
@@ -38,7 +38,8 @@ Download the ready-to-install package from the [Releases page](https://github.co
 3. SaaS deployments are pre-filled with the built-in service address; localized deployments use their own HTTPS origin.
 4. Save. The enterprise ID may be left blank — the extension fetches it from the authorization response.
 5. Tip: **从 cURL 导入** parses a pasted `getAccessToken` cURL command and fills in the address, `appKey` and `appSecurity`. Cookies and request headers are never stored.
-6. Excel import: **从 Excel 批量导入** accepts tenant name, origin, `appKey` and `appSecurity` (a blank origin uses the built-in SaaS address). It previews rows, authorizes each row to fill the enterprise ID, and merges existing tenants by enterprise ID. Max 100 rows per file; row 2 is an example row and is skipped automatically.
+6. Excel import: **从 Excel 批量导入** accepts tenant name, origin, `appKey` and `appSecurity` (a blank origin uses the built-in SaaS address), plus optional **标签一 / 标签二** cells that offer a dropdown built from the tag library. Tags follow the sheet: blank cells clear them, and a file without those columns keeps existing tags; unknown tag names are reported per row in the preview. It previews rows, authorizes each row to fill the enterprise ID, and merges existing tenants by enterprise ID. Max 100 rows per file; row 2 is an example row and is skipped automatically.
+7. Tags: create them in the tenant form (**+ 新建标签**) or in **标签管理** at the bottom of the settings sidebar. Renaming or recolouring a tag updates every tenant that uses it; deleting warns how many tenants are affected. Both the settings rail and the popup picker show the tags and can filter by them.
 
 ### 2. Personnel
 
