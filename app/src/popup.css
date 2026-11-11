@@ -557,6 +557,14 @@ button:focus-visible, select:focus-visible {
   white-space: nowrap;
 }
 
+.tenant-picker-trigger .tenant-picker-tags {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 48%;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
 .tenant-picker-trigger:hover:not(:disabled) {
   border-color: #a9bccf;
 }
@@ -619,11 +627,20 @@ button:focus-visible, select:focus-visible {
   background: #e8f1f9;
 }
 
-.tenant-picker-option>span {
+.tenant-picker-option-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tenant-picker-tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 3px;
+  flex-shrink: 0;
+  max-width: 55%;
 }
 
 .tenant-picker-option small {

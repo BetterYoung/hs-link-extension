@@ -1,5 +1,6 @@
 import { SAAS_ORIGIN, isSaasOrigin } from "./config.js";
 import { normalizeOrigin } from "./model.js";
+import { resolveTagIds } from "./tags.js";
 import { cellText } from "./xlsx.js";
 
 export const TENANT_IMPORT_LIMIT = 100;
@@ -9,8 +10,11 @@ const ALIASES = {
   baseUrl: ["域名", "访问地址", "api地址", "api基础地址", "baseurl", "地址"],
   appKey: ["appkey", "接入账号", "应用key", "应用账号"],
   appSecurity: ["appsecurity", "接入密码", "密钥", "secret", "密码"],
+  tags: ["标签一", "标签1", "标签", "tag1", "第一个标签"],
+  tags2: ["标签二", "标签2", "tag2", "第二个标签"],
 };
 
+/** 必填列：缺失即整份文件不可导入。标签列是可选的，旧模板仍然能导。 */
 const COLUMN_LABEL = {
   name: "租户名称",
   baseUrl: "域名",
@@ -67,9 +71,11 @@ function isExampleRow(row, columns) {
 }
 
 /** 读取并校验租户表格：不联网，只产出逐行计划。 */
-export function planTenantImport(rows, { existing = [], defaultOrigin = SAAS_ORIGIN, maxRows = TENANT_IMPORT_LIMIT } = {}) {
+export function planTenantImport(rows, { existing = [], defaultOrigin = SAAS_ORIGIN, maxRows = TENANT_IMPORT_LIMIT, tags = [] } = {}) {
   if (!Array.isArray(rows) || rows.length === 0) throw new Error("文件没有可读取的内容");
   const { headerIndex, columns } = locateColumns(rows);
+  const tagColumns = [columns.tags, columns.tags2].filter((index) => index >= 0);
+  const hasTagColumns = tagColumns.length > 0;
   const dataRows = rows.slice(headerIndex + 1).filter((row) => !isEmptyRow(row));
   const exampleRows = [];
   const pending = [];
@@ -146,6 +152,25 @@ export function planTenantImport(rows, { existing = [], defaultOrigin = SAAS_ORI
     }
     item.deployment = isSaasOrigin(item.baseUrl) ? "saas" : "onPrem";
 
+    // 标签以表格为准：只要文件带标签列就覆盖（留空即清空）；不带标签列则保留原标签。
+    if (hasTagColumns) {
+      const names = [];
+      for (const index of tagColumns) {
+        for (const part of String(cellText(row, index)).split(/[、,，/;；]+/)) {
+          const name = part.trim();
+          if (name && !names.includes(name)) names.push(name);
+        }
+      }
+      try {
+        item.tagIds = resolveTagIds(tags, names);
+      } catch (error) {
+        item.status = "error";
+        item.error = error.message;
+        items.push(item);
+        continue;
+      }
+    }
+
     const key = `${item.baseUrl}|${item.appKey}`;
     if (seen.has(key)) {
       item.status = "skip";
@@ -159,7 +184,7 @@ export function planTenantImport(rows, { existing = [], defaultOrigin = SAAS_ORI
     items.push(item);
   }
 
-  return { items, headerIndex, exampleRows };
+  return { items, headerIndex, exampleRows, hasTagColumns };
 }
 
 /**
@@ -200,6 +225,7 @@ export function mergeTenantImport(workspace, executed, { makeId = () => crypto.r
         appKey: item.appKey,
         appSecurity: item.appSecurity,
         corporationId,
+        tagIds: item.tagIds ?? existing.tagIds ?? [],
       };
       tenants[index] = merged;
       updated.push({ rowNumber: item.rowNumber, name: merged.name, id: merged.id });
@@ -213,6 +239,7 @@ export function mergeTenantImport(workspace, executed, { makeId = () => crypto.r
       deployment: item.deployment,
       appKey: item.appKey,
       appSecurity: item.appSecurity,
+      tagIds: item.tagIds ?? [],
       people: [],
     };
     tenants.push(created);
@@ -234,27 +261,48 @@ export function mergeTenantImport(workspace, executed, { makeId = () => crypto.r
   };
 }
 
-/** 租户导入模板：数据表 + 填写说明。第 2 行固定为示例数据，导入时自动跳过。 */
-export function tenantTemplateSheets() {
-  return [
-    {
-      name: "租户",
-      rows: [
-        ["租户名称", "域名", "appKey", "appSecurity"],
-        [TENANT_EXAMPLE.name, TENANT_EXAMPLE.baseUrl, TENANT_EXAMPLE.appKey, TENANT_EXAMPLE.appSecurity],
-      ],
-      widths: [20, 30, 26, 30],
-      textColumns: [2, 3],
-    },
-    {
-      name: "填写说明",
-      rows: [
-        ["1. 第 2 行是示例数据，导入时会自动跳过，直接在下方填写真实租户即可。"],
-        ["2. 「域名」填写裸 HTTPS 源，不含路径、账号与参数；SaaS 部署可留空，导入时使用内置地址。"],
-        ["3. 企业 ID 不需要填写，导入时会调用授权接口自动获取；凭据错误或企业 ID 不一致的行会被跳过。"],
-        ["4. appKey、appSecurity 列已设为文本格式，请勿改成数值，否则凭据会被 Excel 截断。"],
-        ["5. 一次最多导入 100 行；同一域名与 appKey 重复的行只会保留第一行。"],
-      ],
-    },
-  ];
+/** 租户导入模板：数据表 + 可选隐藏标签页 + 填写说明。第 2 行固定为示例数据，导入时自动跳过。 */
+export function tenantTemplateSheets({ tags = [] } = {}) {
+  const list = Array.isArray(tags) ? tags : [];
+  const names = list.map((tag) => String(tag?.name ?? "").trim()).filter(Boolean);
+  // 下拉选项来自隐藏「标签」页；标签库为空时不写校验，否则下拉是空的。
+  const validations = names.length ? [{
+    sqref: "E2:E101 F2:F101",
+    formula1: `'标签'!$A$2:$A$${names.length + 1}`,
+    errorTitle: "标签不存在",
+    error: "请从下拉列表选择已创建的标签；新标签请先在「标签管理」中创建",
+  }] : [];
+  const sheets = [{
+    name: "租户",
+    rows: [
+      ["租户名称", "域名", "appKey", "appSecurity", "标签一", "标签二"],
+      [TENANT_EXAMPLE.name, TENANT_EXAMPLE.baseUrl, TENANT_EXAMPLE.appKey, TENANT_EXAMPLE.appSecurity, "", ""],
+    ],
+    widths: [20, 30, 26, 30, 14, 14],
+    textColumns: [2, 3],
+    validations,
+  }];
+  if (names.length) {
+    sheets.push({
+      name: "标签",
+      rows: [["标签"], ...names.map((name) => [name])],
+      widths: [20],
+      hidden: true,
+    });
+  }
+  sheets.push({
+    name: "填写说明",
+    rows: [
+      ["1. 第 2 行是示例数据，导入时会自动跳过，直接在下方填写真实租户即可。"],
+      ["2. 「域名」填写裸 HTTPS 源，不含路径、账号与参数；SaaS 部署可留空，导入时使用内置地址。"],
+      ["3. 企业 ID 不需要填写，导入时会调用授权接口自动获取；凭据错误或企业 ID 不一致的行会被跳过。"],
+      ["4. appKey、appSecurity 列已设为文本格式，请勿改成数值，否则凭据会被 Excel 截断。"],
+      ["5. 一次最多导入 100 行；同一域名与 appKey 重复的行只会保留第一行。"],
+      [`6. 「标签一」「标签二」从下拉列表选择，选项来自设置页「标签管理」；建议每个租户配置 2 个以内标签，便于阅读，模板固定提供两列。`],
+      ["7. 导入时标签以表格为准：留空表示该租户不打标签；若表格没有这两列（旧模板），则保留原有标签。"],
+      ["8. 标签名称必须与「标签管理」中的名称一致，未匹配的行会被标为未导入。"],
+      ["9. 隐藏的「标签」工作表是下拉选项来源，请勿删除或改名。"],
+    ],
+  });
+  return sheets;
 }

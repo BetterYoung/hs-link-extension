@@ -155,19 +155,25 @@ export function readSheets(input) {
     const part = targets.get(item["r:id"]);
     const path = part ? resolvePartPath(part) : `xl/worksheets/sheet${item.sheetId || sheets.length + 1}.xml`;
     const xml = files[path] ? strFromU8(files[path]) : "";
-    sheets.push({ name: String(item.name || `Sheet${sheets.length + 1}`), rows: xml ? parseSheet(xml, sharedStrings) : [] });
+    sheets.push({
+      name: String(item.name || `Sheet${sheets.length + 1}`),
+      hidden: item.state === "hidden",
+      rows: xml ? parseSheet(xml, sharedStrings) : [],
+    });
   }
   if (!sheets.length) throw new Error("该文件中没有可读取的工作表");
   return sheets;
 }
 
-/** 按工作表名（忽略大小写与空格）挑选；跳过“说明”类工作表；找不到则取第一张。 */
+/** 按工作表名（忽略大小写与空格）挑选；跳过隐藏页与“说明”类工作表；找不到则取第一张可见页。 */
 export function pickSheet(sheets, preferred = []) {
+  const visible = sheets.filter((sheet) => !sheet.hidden);
+  const pool = visible.length ? visible : sheets;
   const keys = preferred.map((name) => String(name).replace(/\s+/g, "").toLowerCase());
-  const found = sheets.find((sheet) => keys.includes(String(sheet.name).replace(/\s+/g, "").toLowerCase()));
+  const found = pool.find((sheet) => keys.includes(String(sheet.name).replace(/\s+/g, "").toLowerCase()));
   if (found) return found;
-  const dataSheet = sheets.find((sheet) => !/说明|instructions|help|readme/i.test(String(sheet.name)));
-  return dataSheet || sheets[0];
+  const dataSheet = pool.find((sheet) => !/说明|instructions|help|readme/i.test(String(sheet.name)));
+  return dataSheet || pool[0];
 }
 
 /** 取单元格文本，超过列宽的空位按空串处理。 */
@@ -203,7 +209,7 @@ const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cellStyles count="1"><cellStyle name="常规" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`;
 
-function sheetXml(rowData, { widths = [], textColumns = [] } = {}) {
+function sheetXml(rowData, { widths = [], textColumns = [], validations = [], hidden = false } = {}) {
   const width = rowData.reduce((max, row) => Math.max(max, row.length), 0);
   const cols = widths.length
     ? `<cols>${widths.map((value, index) => `<col min="${index + 1}" max="${index + 1}" width="${value}" customWidth="1"/>`).join("")}</cols>`
@@ -219,24 +225,38 @@ function sheetXml(rowData, { widths = [], textColumns = [] } = {}) {
     }).join("");
     return `<row r="${rowIndex + 1}">${cells}</row>`;
   }).join("");
+  const view = hidden
+    ? ""
+    : '<sheetViews><sheetView tabSelected="1" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>';
+  // dataValidations 在 OOXML 里必须排在 sheetData 之后；供模板下拉使用。
+  const validationXml = validations.length
+    ? `<dataValidations count="${validations.length}">${validations.map((validation) => {
+      const title = validation.errorTitle ? ` errorTitle="${escapeXml(validation.errorTitle)}"` : "";
+      const message = validation.error ? ` error="${escapeXml(validation.error)}"` : "";
+      return `<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1"${title}${message} sqref="${escapeXml(validation.sqref)}"><formula1>${escapeXml(validation.formula1)}</formula1></dataValidation>`;
+    }).join("")}</dataValidations>`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
 <dimension ref="A1:${columnName(Math.max(width, 1) - 1)}${Math.max(rowData.length, 1)}"/>
-<sheetViews><sheetView tabSelected="1" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+${view}
 ${cols}
 <sheetData>${rows}</sheetData>
+${validationXml}
 </worksheet>`;
 }
 
 /**
- * 生成 .xlsx 字节。sheets: `[{ name, rows, widths?, textColumns? }]`。
- * `textColumns` 会把对应列写成文本格式，避免 Excel 把手机号、凭据转成数字。
+ * 生成 .xlsx 字节。sheets: `[{ name, rows, widths?, textColumns?, validations?, hidden? }]`。
+ * `textColumns` 会把对应列写成文本格式，避免 Excel 把手机号、凭据转成数字；
+ * `validations` 写列表校验（下拉），`hidden` 隐藏工作表（常用于下拉选项来源页）。
  */
 export function buildWorkbook({ sheets }) {
   if (!Array.isArray(sheets) || !sheets.length) throw new Error("至少需要一个工作表");
+  if (sheets.every((sheet) => sheet.hidden)) throw new Error("至少需要一个可见工作表");
   const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<sheets>${sheets.map((sheet, index) => `<sheet name="${escapeXml(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join("")}</sheets>
+<sheets>${sheets.map((sheet, index) => `<sheet name="${escapeXml(sheet.name)}" sheetId="${index + 1}"${sheet.hidden ? ' state="hidden"' : ""} r:id="rId${index + 1}"/>`).join("")}</sheets>
 </workbook>`;
   const workbookRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">

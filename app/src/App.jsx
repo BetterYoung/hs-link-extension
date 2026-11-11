@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { Download, Eye, EyeOff, FileUp, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import { Download, Eye, EyeOff, FileUp, Pencil, Plus, Search, Tag, Trash2, X } from "lucide-react";
 import { createBackup, emptyWorkspace, loadWorkspace, normalizePerson, normalizeTenant, parseBackup, prepareBackupImport, saveWorkspace, STORAGE_KEY } from "./model.js";
 import { authorizeTenant, createTenantAuthorizer, parseCurlCommand, requestOriginPermissions, resolveStaff } from "./openapi.js";
 import { PeopleView } from "./PeopleView.jsx";
 import { ImportPreview } from "./ImportPreview.jsx";
+import { TagList, TagManagerBody, TagPicker } from "./TagPicker.jsx";
+import { createTag, removeTag, tagsOf, updateTag } from "./tags.js";
 import { planPersonImport, personTemplateSheets, PERSON_IMPORT_LIMIT } from "./importPeople.js";
 import { mergeTenantImport, planTenantImport, tenantTemplateSheets, TENANT_IMPORT_LIMIT } from "./importTenants.js";
 import { savePeopleToTenants, groupResultsByPerson, upsertPerson } from "./tenantOps.js";
@@ -12,7 +14,7 @@ import { SAAS_ORIGIN } from "./config.js";
 
 const SAAS_DEFAULT_ORIGIN = SAAS_ORIGIN;
 const IMPORT_FILE_LIMIT = 5 * 1024 * 1024;
-const blankTenant = { name: "", corporationId: "", baseUrl: SAAS_DEFAULT_ORIGIN, deployment: "saas", appKey: "", appSecurity: "" };
+const blankTenant = { name: "", corporationId: "", baseUrl: SAAS_DEFAULT_ORIGIN, deployment: "saas", appKey: "", appSecurity: "", tagIds: [] };
 const blankPerson = { name: "", staffId: "", code: "", phone: "", email: "" };
 
 function downloadBytes(filename, bytes) {
@@ -44,7 +46,7 @@ function DetailField({ label, children, className = "" }) {
 }
 
 /** 批量新增人员时的租户多选器：默认全选，支持按名称搜索。 */
-function BatchTenantPicker({ tenants, value, onChange }) {
+function BatchTenantPicker({ tenants, value, onChange, tags = [] }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const rootRef = useRef(null);
@@ -60,7 +62,8 @@ function BatchTenantPicker({ tenants, value, onChange }) {
 
   const selected = new Set(value);
   const term = query.trim().toLocaleLowerCase();
-  const filtered = tenants.filter((tenant) => tenant.name.toLocaleLowerCase().includes(term));
+  const filtered = tenants.filter((tenant) => [tenant.name, ...tagsOf(tags, tenant).map((tag) => tag.name)]
+    .some((text) => text.toLocaleLowerCase().includes(term)));
   const allSelected = tenants.length > 0 && tenants.every((tenant) => selected.has(tenant.id));
   const filteredSelected = filtered.length > 0 && filtered.every((tenant) => selected.has(tenant.id));
   const single = value.length === 1 ? tenants.find((tenant) => tenant.id === value[0]) : null;
@@ -74,7 +77,7 @@ function BatchTenantPicker({ tenants, value, onChange }) {
       <span>{label}</span><span className="batch-tenant-arrow" aria-hidden="true">{open ? "▴" : "▾"}</span>
     </button>
     {open && <div className="batch-tenant-panel" role="group" aria-label="选择租户">
-      <input className="batch-tenant-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索租户名称" aria-label="搜索租户名称" autoFocus />
+      <input className="batch-tenant-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索租户名称或标签" aria-label="搜索租户名称或标签" autoFocus />
       <label className="batch-tenant-option batch-tenant-all">
         <input type="checkbox" checked={filteredSelected} onChange={(event) => {
           const ids = new Set(filtered.map((tenant) => tenant.id));
@@ -84,7 +87,8 @@ function BatchTenantPicker({ tenants, value, onChange }) {
       </label>
       {filtered.map((tenant) => <label className="batch-tenant-option" key={tenant.id}>
         <input type="checkbox" checked={selected.has(tenant.id)} onChange={(event) => onChange(event.target.checked ? [...value, tenant.id] : value.filter((id) => id !== tenant.id))} />
-        <span>{tenant.name}</span><small>{tenant.deployment === "saas" ? "SaaS" : "本地化"}</small>
+        <span>{tenant.name}</span>
+        <span className="tenant-option-tags"><TagList tags={tagsOf(tags, tenant)} max={3} small /></span>
       </label>)}
       {filtered.length === 0 && <p className="batch-tenant-empty">没有匹配的租户</p>}
     </div>}
@@ -126,10 +130,15 @@ function PersonImportPreview({ plan, selectedTenantCount, busy, progress }) {
   </>;
 }
 
-function TenantImportPreview({ plan, busy, progress }) {
+function TenantImportPreview({ plan, busy, progress, tags }) {
   const okItems = plan.items.filter((item) => item.status === "create" || item.status === "update");
   const invalid = plan.items.length - okItems.length;
   const label = { create: "新增", update: "更新", skip: "跳过", error: "错误" };
+  const tagText = (item) => {
+    if (!item.tagIds) return "—";
+    const names = item.tagIds.map((id) => tags.find((tag) => tag.id === id)?.name).filter(Boolean);
+    return names.length ? names.join("、") : "（无）";
+  };
   const rows = plan.items.map((item) => ({
     key: `tenant-row-${item.rowNumber}`,
     tone: item.status,
@@ -138,14 +147,16 @@ function TenantImportPreview({ plan, busy, progress }) {
       item.name || "（空）",
       item.baseUrl || "—",
       item.appKey || "—",
+      tagText(item),
       `${label[item.status]}${item.error ? `：${item.error}` : ""}`,
     ],
   }));
   return <>
     <p className="import-summary">共 {plan.items.length} 行：可导入 <strong>{okItems.length}</strong> 行（新增 {plan.items.filter((item) => item.status === "create").length}、更新 {plan.items.filter((item) => item.status === "update").length}），跳过或错误 <strong>{invalid}</strong> 行。</p>
     {plan.exampleRows?.length ? <p className="form-note">已自动跳过第 {plan.exampleRows.join("、")} 行的示例数据。</p> : null}
+    {plan.hasTagColumns ? <p className="form-note">本次表格带标签列，导入时会用表格里的标签覆盖租户原有标签（留空即清空）。</p> : <p className="form-note">表格没有标签列，导入时保留租户原有标签。</p>}
     {busy && progress && <p className="import-progress">正在处理 第 {progress.done} / {progress.total} 个租户…</p>}
-    <ImportPreview label="租户导入预览" headers={["行", "租户名称", "域名", "appKey", "状态"]} rows={rows} />
+    <ImportPreview label="租户导入预览" headers={["行", "租户名称", "域名", "appKey", "标签", "状态"]} rows={rows} />
   </>;
 }
 
@@ -189,6 +200,8 @@ export function App() {
   const [pendingImport, setPendingImport] = useState(null);
   const [backupImportMode, setBackupImportMode] = useState("merge");
   const [backupImportBusy, setBackupImportBusy] = useState(false);
+  // 标签管理弹窗需要记住从哪个对话框进入，关闭后回到原处。
+  const [tagManagerReturn, setTagManagerReturn] = useState(null);
   const [saving, setSaving] = useState(false);
   const [curlText, setCurlText] = useState("");
   const [batchResult, setBatchResult] = useState(null);
@@ -270,8 +283,43 @@ export function App() {
     : "";
   const personToDelete = tenant?.people.find((item) => item.id === form?.id);
   const normalizedTenantQuery = tenantQuery.trim().toLocaleLowerCase();
-  const visibleTenants = workspace?.tenants.filter((item) => [item.name, item.corporationId]
+  const tenantTags = (item) => tagsOf(workspace?.tags, item);
+  const visibleTenants = workspace?.tenants.filter((item) => [item.name, item.corporationId, ...tenantTags(item).map((tag) => tag.name)]
     .some((value) => value.toLocaleLowerCase().includes(normalizedTenantQuery))) ?? [];
+
+  /** 标签库变更后同步摘除租户上的失效引用，避免留下悬空 id。 */
+  function applyTags(nextTags) {
+    const known = new Set(nextTags.map((tag) => tag.id));
+    const tenants = workspace.tenants.map((item) => {
+      const tagIds = (item.tagIds || []).filter((id) => known.has(id));
+      return tagIds.length === (item.tagIds || []).length ? item : { ...item, tagIds };
+    });
+    persist({ ...workspace, tags: nextTags, tenants });
+  }
+
+  function handleCreateTag(name, color) {
+    const { tags, tag } = createTag(workspace.tags, { name, color });
+    applyTags(tags);
+    return tag;
+  }
+
+  function handleRenameTag(id, name) {
+    applyTags(updateTag(workspace.tags, id, { name }));
+  }
+
+  function handleRecolorTag(id, color) {
+    applyTags(updateTag(workspace.tags, id, { color }));
+  }
+
+  function handleDeleteTag(id) {
+    applyTags(removeTag(workspace.tags, id));
+  }
+
+  function openTagManager() {
+    setTagManagerReturn(dialog);
+    setNotice("");
+    setDialog("tagManager");
+  }
 
   function persist(next) {
     setWorkspace(next);
@@ -319,17 +367,26 @@ export function App() {
 
   async function saveTenant(event) {
     event.preventDefault();
+    // 只处理租户表单自身的提交：内嵌控件的 submit 冒泡到这里时不得保存。
+    if (event.target !== event.currentTarget) return;
     if (saving) return;
     setSaving(true);
     setNotice("");
     try {
       let next = { ...form, people: form.people || [] };
+      // SaaS 的入口地址由部署方式决定，保存前统一校正（授权也用它，必须先于 authorizeTenant）。
+      if (next.deployment === "saas") next = { ...next, baseUrl: SAAS_DEFAULT_ORIGIN };
       if (!String(next.corporationId || "").trim()) {
         const authorized = await authorizeTenant(next);
         next = { ...next, corporationId: authorized.corporationId };
         setForm({ ...form, corporationId: authorized.corporationId });
       }
-      const updated = normalizeTenant({ ...next, id: next.id || crypto.randomUUID(), people: next.people || [] });
+      const updated = normalizeTenant({
+        ...next,
+        id: next.id || crypto.randomUUID(),
+        tagIds: (next.tagIds || []).filter((id) => workspace.tags.some((tag) => tag.id === id)),
+        people: next.people || [],
+      });
       const tenants = dialog === "editTenant"
         ? workspace.tenants.map((item) => item.id === updated.id ? updated : item)
         : [...workspace.tenants, updated];
@@ -418,7 +475,7 @@ export function App() {
   }
 
   function downloadTenantTemplate() {
-    downloadBytes("小合易联-租户导入模板.xlsx", buildWorkbook({ sheets: tenantTemplateSheets() }));
+    downloadBytes("小合易联-租户导入模板.xlsx", buildWorkbook({ sheets: tenantTemplateSheets({ tags: workspace.tags }) }));
   }
 
   function downloadPersonTemplate() {
@@ -454,7 +511,7 @@ export function App() {
     setTenantFileName(file.name);
     try {
       const rows = await readImportRows(file, ["租户"]);
-      setTenantPlan(planTenantImport(rows, { existing: workspace.tenants, defaultOrigin: SAAS_DEFAULT_ORIGIN }));
+      setTenantPlan(planTenantImport(rows, { existing: workspace.tenants, defaultOrigin: SAAS_DEFAULT_ORIGIN, tags: workspace.tags }));
     } catch (error) {
       setTenantPlan(null);
       setTenantImportError(error.message);
@@ -716,19 +773,28 @@ export function App() {
             <button className="add-tenant-action" disabled={!workspace.tenants.length} title={workspace.tenants.length ? "选择一个或多个租户批量新增人员" : "请先新增租户"} onClick={() => openDialog("BatchPerson")}><Plus size={17} />批量新增人员</button>
           </div>
         </div>
-        <label className="tenant-search"><Search size={19} aria-hidden="true" /><input value={tenantQuery} onChange={(event) => setTenantQuery(event.target.value)} placeholder="搜索租户名称或企业 ID" aria-label="搜索租户" /></label>
+        <label className="tenant-search"><Search size={19} aria-hidden="true" /><input value={tenantQuery} onChange={(event) => setTenantQuery(event.target.value)} placeholder="搜索租户名称、企业 ID 或标签" aria-label="搜索租户" /></label>
         <nav className="tenant-list" aria-label="租户列表">
-          {visibleTenants.map((item) => <button className={`tenant-option ${tenant?.id === item.id ? "active" : ""}`} key={item.id} onClick={() => selectTenant(item.id)}><span>{item.name}</span><small>{item.deployment === "saas" ? "SaaS" : "本地化"}</small></button>)}
+          {visibleTenants.map((item) => {
+            const chips = tenantTags(item);
+            return <button className={`tenant-option ${tenant?.id === item.id ? "active" : ""}`} key={item.id} onClick={() => selectTenant(item.id)}>
+              <span className="tenant-option-name">{item.name}</span>
+              {chips.length > 0 && <span className="tenant-option-tags"><TagList tags={chips} max={3} small /></span>}
+            </button>;
+          })}
           {visibleTenants.length === 0 && <div className="tenant-empty">{normalizedTenantQuery ? "没有匹配的租户" : "尚未添加租户"}</div>}
         </nav>
       </section>
-      <div className="sidebar-bottom"><button className="sidebar-bottom-action" onClick={() => setDialog("backup")}><FileUp size={19} />导入 / 导出</button></div>
+      <div className="sidebar-bottom">
+        <button className="sidebar-bottom-action" onClick={openTagManager}><Tag size={19} />标签管理</button>
+        <button className="sidebar-bottom-action" onClick={() => setDialog("backup")}><FileUp size={19} />导入 / 导出</button>
+      </div>
     </aside>
     <main className="settings-main">
       {notice && !dialog && <div className="notice" role="alert">{notice}<button className="icon-button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={16} /></button></div>}
       {tenant ? <>
         <header className="tenant-titlebar">
-          <div className="tenant-title"><h1>{tenant.name}</h1><span>{tenant.deployment === "saas" ? "SaaS" : "本地化"}</span></div>
+          <div className="tenant-title"><h1>{tenant.name}</h1><TagList tags={tenantTags(tenant)} /></div>
           <div className="tenant-actions">
             <button className="secondary-button compact" onClick={() => openDialog("Tenant", tenant)}><Pencil size={17} />编辑租户</button>
             <button className="danger-button compact" onClick={() => setDialog("deleteTenant")}><Trash2 size={17} />删除租户</button>
@@ -759,8 +825,11 @@ export function App() {
         </div>}
         <Field label="租户名称" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required />
         <Field label="企业 ID" value={form.corporationId} onChange={(event) => setForm({ ...form, corporationId: event.target.value })} placeholder="留空后自动获取" />
-        <label className="field"><span>部署方式</span><select value={form.deployment} onChange={(event) => setForm({ ...form, deployment: event.target.value, baseUrl: event.target.value === "saas" ? SAAS_DEFAULT_ORIGIN : form.baseUrl })}><option value="saas">SaaS</option><option value="onPrem">本地化</option></select></label>
-        <Field label="访问地址（HTTPS 域名）" type="url" value={form.baseUrl} onChange={(event) => setForm({ ...form, baseUrl: event.target.value })} required />
+        <div className="field tag-field"><span>标签（建议不超过 2 个）</span><TagPicker tags={workspace.tags} value={form.tagIds || []} onChange={(tagIds) => setForm({ ...form, tagIds })} onCreate={handleCreateTag} onManage={openTagManager} /></div>
+        <label className="field"><span>部署方式</span><select value={form.deployment} onChange={(event) => setForm({ ...form, deployment: event.target.value, baseUrl: event.target.value === "saas" ? SAAS_DEFAULT_ORIGIN : "" })}><option value="saas">SaaS</option><option value="onPrem">本地化</option></select></label>
+        <Field label="访问地址（HTTPS 域名）" type="url" value={form.deployment === "saas" ? SAAS_DEFAULT_ORIGIN : form.baseUrl} onChange={(event) => setForm({ ...form, baseUrl: event.target.value })} readOnly={form.deployment === "saas"} placeholder="例如 https://your-company.example.com" required />
+        {form.deployment === "saas" && <p className="form-note">SaaS 部署固定使用内置服务地址，无需填写；需要自有域名请把部署方式改为「本地化」。</p>}
+        {form.deployment === "onPrem" && <p className="form-note">本地化部署请填写自有 HTTPS 域名，只填域名、不含路径和参数。</p>}
         <Field label="接入账号（appKey）" value={form.appKey} onChange={(event) => setForm({ ...form, appKey: event.target.value })} required autoComplete="off" />
         <label className="field"><span>接入密码（appSecurity）</span><div className="password-wrap"><input type={showPassword ? "text" : "password"} value={form.appSecurity} onChange={(event) => setForm({ ...form, appSecurity: event.target.value })} required autoComplete="new-password" /><button type="button" className="icon-button" title={showPassword ? "隐藏密码" : "显示密码"} aria-label={showPassword ? "隐藏密码" : "显示密码"} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></div></label>
         <p className="form-note">企业 ID 可留空，保存时会通过接入凭证自动获取；接入密码会以明文保存在当前浏览器的扩展本地资料中。</p>
@@ -789,7 +858,7 @@ export function App() {
       </>}>
       <form id="person-form" className="edit-form" onSubmit={dialog === "addBatchPerson" && personSource === "file" ? (event) => event.preventDefault() : savePerson}>
         {dialog === "addBatchPerson" ? <>
-          <div className="field"><span>租户</span><BatchTenantPicker tenants={workspace.tenants} value={batchTenantIds} onChange={setBatchTenantIds} /></div>
+          <div className="field"><span>租户</span><BatchTenantPicker tenants={workspace.tenants} tags={workspace.tags} value={batchTenantIds} onChange={setBatchTenantIds} /></div>
           <div className="import-source-tabs" role="tablist" aria-label="人员来源">
             <button type="button" role="tab" aria-selected={personSource === "manual"} className={`import-source-tab${personSource === "manual" ? " active" : ""}`} onClick={() => setPersonSource("manual")}>手动填写</button>
             <button type="button" role="tab" aria-selected={personSource === "file"} className={`import-source-tab${personSource === "file" ? " active" : ""}`} onClick={() => setPersonSource("file")}>从 Excel 导入</button>
@@ -827,9 +896,20 @@ export function App() {
           <button type="button" className="outline-button compact" onClick={() => tenantFileInput.current?.click()}><FileUp size={17} />选择 Excel 文件</button>
           {tenantFileName && <span className="import-file-name" title={tenantFileName}>{tenantFileName}</span>}
         </div>
-        <p className="form-note">表格列为租户名称、域名、appKey、appSecurity；第 2 行示例数据会自动跳过，域名留空时使用内置 SaaS 地址。导入时会逐个调用授权接口获取企业 ID，一次最多 {TENANT_IMPORT_LIMIT} 行。</p>
-        {tenantPlan && <TenantImportPreview plan={tenantPlan} busy={tenantImportBusy} progress={tenantImportProgress} />}
+        <p className="form-note">表格列为租户名称、域名、appKey、appSecurity，可选「标签一」「标签二」（下拉选择已创建的标签）；第 2 行示例数据会自动跳过，域名留空时使用内置 SaaS 地址。导入时会逐个调用授权接口获取企业 ID，一次最多 {TENANT_IMPORT_LIMIT} 行。</p>
+        {tenantPlan && <TenantImportPreview plan={tenantPlan} busy={tenantImportBusy} progress={tenantImportProgress} tags={workspace.tags} />}
       </div>
+    </Modal>}
+
+    {dialog === "tagManager" && <Modal title="标签管理" wide onClose={() => setDialog(tagManagerReturn ?? null)} footer={<button className="secondary-button" onClick={() => setDialog(tagManagerReturn ?? null)}>完成</button>}>
+      <TagManagerBody
+        tags={workspace.tags}
+        tenants={workspace.tenants}
+        onCreate={handleCreateTag}
+        onRename={handleRenameTag}
+        onRecolor={handleRecolorTag}
+        onDelete={handleDeleteTag}
+      />
     </Modal>}
 
     {dialog === "tenantImportResult" && tenantResult && <Modal title="导入租户结果" onClose={() => { if (!tenantImportBusy) setDialog("addTenant"); }} footer={<>

@@ -1,11 +1,12 @@
 export const STORAGE_KEY = "access-link-workspace-v1";
-import { BACKUP_FORMAT_ID, isKnownBackupFormat } from "./config.js";
+import { BACKUP_FORMAT_ID, isKnownBackupFormat, LEGACY_SAAS_ORIGIN, SAAS_ORIGIN } from "./config.js";
+import { normalizeTagList, sameTagName } from "./tags.js";
 
 export const BACKUP_FORMAT = BACKUP_FORMAT_ID;
 export const SCHEMA_VERSION = 1;
 
 export function emptyWorkspace() {
-  return { schemaVersion: SCHEMA_VERSION, tenants: [], selectedTenantId: null, selectedPersonId: null };
+  return { schemaVersion: SCHEMA_VERSION, tags: [], tenants: [], selectedTenantId: null, selectedPersonId: null };
 }
 
 export function normalizeOrigin(input) {
@@ -44,6 +45,18 @@ export function normalizePerson(input) {
   return person;
 }
 
+/** 租户标签引用：去重；悬空引用与超量截断由 normalizeWorkspace 统一处理。 */
+function normalizeTagIds(input) {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) throw new Error("租户标签格式不正确");
+  const ids = [];
+  for (const value of input) {
+    const id = text(value, "标签记录 ID", 100, true);
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
 export function normalizeTenant(input) {
   if (!Array.isArray(input.people) || input.people.length > 1000) throw new Error("人员列表格式不正确");
   const tenant = {
@@ -54,6 +67,7 @@ export function normalizeTenant(input) {
     deployment: input.deployment,
     appKey: text(input.appKey, "接入账号", 300, true),
     appSecurity: text(input.appSecurity, "接入密码", 500, true),
+    tagIds: normalizeTagIds(input.tagIds),
     people: input.people.map(normalizePerson),
   };
   // 同一租户内按人员 ID（staffId）去重，保留最后一条
@@ -65,6 +79,8 @@ export function normalizeTenant(input) {
     return true;
   }).reverse();
   if (!["saas", "onPrem"].includes(tenant.deployment)) throw new Error("部署方式不正确");
+  // 历史版本把 SaaS 默认地址拼错，读到就纠正；用户自定义的地址保持原样。
+  if (tenant.deployment === "saas" && tenant.baseUrl === LEGACY_SAAS_ORIGIN) tenant.baseUrl = SAAS_ORIGIN;
   if (new Set(tenant.people.map((person) => person.id)).size !== tenant.people.length) {
     throw new Error("人员记录 ID 重复");
   }
@@ -76,7 +92,16 @@ export function normalizeWorkspace(input) {
       !Array.isArray(input.tenants) || input.tenants.length > 200) {
     throw new Error("备份版本或资料格式不受支持");
   }
-  const tenants = input.tenants.map(normalizeTenant);
+  const tags = normalizeTagList(input.tags);
+  const knownTagIds = new Set(tags.map((tag) => tag.id));
+  // 手工编辑或跨库合并后可能残留失效引用，这里统一丢弃，避免整份资料读不出来。
+  const tenants = input.tenants.map((tenant) => {
+    const normalized = normalizeTenant(tenant);
+    return {
+      ...normalized,
+      tagIds: normalized.tagIds.filter((id) => knownTagIds.has(id)),
+    };
+  });
   if (new Set(tenants.map((tenant) => tenant.id)).size !== tenants.length) {
     throw new Error("租户记录 ID 重复");
   }
@@ -85,7 +110,7 @@ export function normalizeWorkspace(input) {
   const selectedTenant = tenants.find((tenant) => tenant.id === selectedTenantId);
   const selectedPersonId = selectedTenant?.people.some((person) => person.id === input.selectedPersonId)
     ? input.selectedPersonId : selectedTenant?.people[0]?.id ?? null;
-  return { schemaVersion: SCHEMA_VERSION, tenants, selectedTenantId, selectedPersonId };
+  return { schemaVersion: SCHEMA_VERSION, tags, tenants, selectedTenantId, selectedPersonId };
 }
 
 export function applyResolvedStaffId(workspace, tenantId, personId, staffId) {
@@ -139,7 +164,7 @@ export function parseBackup(json) {
 }
 
 // 合并只补充资料；无法可靠判定身份时停止，避免静默覆盖。
-export function mergeBackup(current, backup) {
+export function mergeBackup(current, backup, { makeTagId = () => crypto.randomUUID() } = {}) {
   const local = normalizeWorkspace(current);
   const incoming = normalizeWorkspace(backup);
   const assertUniqueCorporations = (tenants) => {
@@ -149,16 +174,53 @@ export function mergeBackup(current, backup) {
   };
   assertUniqueCorporations(local.tenants);
   assertUniqueCorporations(incoming.tenants);
-  const tenants = local.tenants.map((tenant) => ({ ...tenant, people: tenant.people.map((person) => ({ ...person })) }));
+  // 标签库按名称求并集，同名（忽略大小写与首尾空格）保留本地颜色；导入方 id 映射到合并后的 id。
+  const tags = [...local.tags];
+  const usedTagIds = new Set(tags.map((tag) => tag.id));
+  const tagIdMap = new Map();
+  for (const tag of incoming.tags) {
+    const existing = tags.find((item) => sameTagName(item.name, tag.name));
+    if (existing) {
+      tagIdMap.set(tag.id, existing.id);
+      continue;
+    }
+    // 名称不同但记录 ID 撞车：给导入的标签换一个新 ID，否则租户引用会指向本地另一个标签。
+    let id = tag.id;
+    if (usedTagIds.has(id)) {
+      let attempt = 0;
+      do {
+        id = makeTagId();
+        attempt += 1;
+      } while (usedTagIds.has(id) && attempt < 10);
+      if (usedTagIds.has(id)) throw new Error("标签记录 ID 冲突，无法安全合并");
+    }
+    usedTagIds.add(id);
+    tagIdMap.set(tag.id, id);
+    tags.push(id === tag.id ? tag : { ...tag, id });
+  }
+  const mergeTagIds = (target, source) => {
+    const ids = [...(target || [])];
+    for (const id of source || []) {
+      const mapped = tagIdMap.get(id) ?? id;
+      if (!ids.includes(mapped)) ids.push(mapped);
+    }
+    return ids;
+  };
+  const tenants = local.tenants.map((tenant) => ({
+    ...tenant,
+    tagIds: [...tenant.tagIds],
+    people: tenant.people.map((person) => ({ ...person })),
+  }));
   for (const source of incoming.tenants) {
     const byCorp = tenants.findIndex((item) => item.corporationId === source.corporationId);
     const byId = tenants.findIndex((item) => item.id === source.id);
     if (byId !== -1 && byId !== byCorp) throw new Error("租户记录 ID 对应不同企业，无法安全合并");
     if (byCorp === -1) {
-      tenants.push(source);
+      tenants.push({ ...source, tagIds: mergeTagIds([], source.tagIds) });
       continue;
     }
     const target = tenants[byCorp];
+    target.tagIds = mergeTagIds(target.tagIds, source.tagIds);
     for (const person of source.people) {
       const byPersonId = target.people.findIndex((item) => item.id === person.id);
       const byStaffId = person.staffId ? target.people.findIndex((item) => item.staffId === person.staffId) : -1;
@@ -174,7 +236,7 @@ export function mergeBackup(current, backup) {
       }
     }
   }
-  return normalizeWorkspace({ ...local, tenants });
+  return normalizeWorkspace({ ...local, tags, tenants });
 }
 
 export async function loadWorkspace() {
@@ -208,10 +270,15 @@ export async function saveWorkspace(workspace) {
 function demoWorkspace() {
   return normalizeWorkspace({
     schemaVersion: SCHEMA_VERSION,
+    tags: [
+      { id: "tag-demo-prod", name: "演示生产", color: "#d92d20" },
+      { id: "tag-demo-test", name: "演示测试", color: "#b54708" },
+    ],
     tenants: [{
       id: "demo-tenant", name: "演示企业", corporationId: "DEMO-CORP",
       baseUrl: "https://saas.example.com", deployment: "saas",
       appKey: "DEMO-APP-KEY", appSecurity: "DEMO-ONLY-NOT-A-SECRET",
+      tagIds: ["tag-demo-prod"],
       people: [
         { id: "demo-1", name: "陈晨", staffId: "DEMO:10028", code: "10028", phone: "13800003268", email: "chenchen@example.com" },
         { id: "demo-2", name: "李明", staffId: "DEMO:10012", code: "10012", phone: "13900004321", email: "liming@example.com" },

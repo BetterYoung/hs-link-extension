@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Copy, ExternalLink, Link2, LoaderCircle, Search, Settings } from "lucide-react";
 import { applyResolvedPerson, emptyWorkspace, loadWorkspace, saveWorkspace, STORAGE_KEY } from "./model.js";
+import { tagsOf } from "./tags.js";
+import { TagList } from "./TagPicker.jsx";
 import { authorizeTenant, generateAccessLink, PermissionRequiredError, requestOriginPermission, resolveStaff } from "./openapi.js";
 import {
   findLocalMatches,
@@ -12,8 +14,8 @@ import {
 
 const RULE_LABEL = "Web 首页 · 7 天 · 可重复访问";
 
-/** 租户选择器：支持按名称搜索的下拉单选。 */
-function TenantPicker({ tenants, value, onChange, disabled }) {
+/** 租户选择器：支持按名称与标签搜索的下拉单选。 */
+function TenantPicker({ tenants, value, onChange, disabled, tags = [] }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const rootRef = useRef(null);
@@ -31,8 +33,10 @@ function TenantPicker({ tenants, value, onChange, disabled }) {
   }, [open]);
 
   const selected = tenants.find((tenant) => tenant.id === value) || null;
+  const selectedTags = selected ? tagsOf(tags, selected) : [];
   const term = query.trim().toLocaleLowerCase();
-  const filtered = tenants.filter((tenant) => tenant.name.toLocaleLowerCase().includes(term));
+  const filtered = tenants.filter((tenant) => [tenant.name, ...tagsOf(tags, tenant).map((tag) => tag.name)]
+    .some((text) => text.toLocaleLowerCase().includes(term)));
   const choose = (id) => {
     onChange(id);
     setOpen(false);
@@ -41,12 +45,17 @@ function TenantPicker({ tenants, value, onChange, disabled }) {
 
   return <div className="tenant-picker" ref={rootRef}>
     <button type="button" className="tenant-picker-trigger" disabled={disabled} aria-haspopup="listbox" aria-expanded={open} title={selected ? selected.name : "请选择租户"} onClick={() => { setOpen(!open); setQuery(""); }}>
-      <span>{selected ? selected.name : "请选择租户"}</span><span className="tenant-picker-arrow" aria-hidden="true">{open ? "▴" : "▾"}</span>
+      <span className="tenant-picker-name">{selected ? selected.name : "请选择租户"}</span>
+      {selectedTags.length > 0 && <span className="tenant-picker-tags"><TagList tags={selectedTags} max={2} small /></span>}
+      <span className="tenant-picker-arrow" aria-hidden="true">{open ? "▴" : "▾"}</span>
     </button>
     {open && <div className="tenant-picker-panel">
-      <input className="tenant-picker-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索租户名称" aria-label="搜索租户名称" autoFocus />
+      <input className="tenant-picker-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索租户名称或标签" aria-label="搜索租户名称或标签" autoFocus />
       <div className="tenant-picker-list" role="listbox" aria-label="租户列表">
-        {filtered.map((tenant) => <button type="button" role="option" aria-selected={tenant.id === value} className={`tenant-picker-option${tenant.id === value ? " active" : ""}`} onClick={() => choose(tenant.id)} key={tenant.id}><span>{tenant.name}</span><small>{tenant.deployment === "saas" ? "SaaS" : "本地化"}</small></button>)}
+        {filtered.map((tenant) => <button type="button" role="option" aria-selected={tenant.id === value} className={`tenant-picker-option${tenant.id === value ? " active" : ""}`} onClick={() => choose(tenant.id)} key={tenant.id}>
+          <span className="tenant-picker-option-name">{tenant.name}</span>
+          <span className="tenant-picker-tags"><TagList tags={tagsOf(tags, tenant)} max={2} small /></span>
+        </button>)}
         {filtered.length === 0 && <p className="tenant-picker-empty">没有匹配的租户</p>}
       </div>
     </div>}
@@ -424,7 +433,7 @@ export function PopupApp() {
     </header>
 
     <section className="popup-fields" aria-label="快捷生成设置">
-      <div className="popup-row"><span>租户</span><TenantPicker tenants={workspace.tenants} value={tenant?.id || ""} onChange={selectTenant} disabled={!workspace.tenants.length} /></div>
+      <div className="popup-row"><span>租户</span><TenantPicker tenants={workspace.tenants} tags={workspace.tags} value={tenant?.id || ""} onChange={selectTenant} disabled={!workspace.tenants.length} /></div>
       <div className="popup-row"><span>人员</span><PersonPicker people={tenant?.people || []} value={person?.id || ""} onChange={selectPerson} onLookup={lookupPerson} disabled={!tenant} /></div>
       <div className="popup-row"><span>链接</span><div className="popup-link" title={result?.url || "生成后显示访问链接"}><span>{result?.url || "生成后显示访问链接"}</span><button type="button" disabled={!result} title="复制链接" aria-label="复制链接" onClick={copyLink}>{copied ? <Check size={19} /> : <Copy size={19} />}</button></div></div>
     </section>
