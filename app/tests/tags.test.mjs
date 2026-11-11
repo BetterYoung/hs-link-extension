@@ -159,3 +159,49 @@ test("增量合并对租户标签取并集，不设数量上限", () => {
   assert.equal(merged.tags.length, 3);
   assert.deepEqual(merged.tenants[0].tagIds, ["a", "b", merged.tags.find((tag) => tag.name === "预发").id]);
 });
+
+test("合并按不区分大小写的名称识别同名标签，引用不丢失", () => {
+  const local = normalizeWorkspace(workspace(
+    [{ id: "local-prod", name: "prod", color: "#d92d20" }],
+    [tenant("t1", "CORP-1", { tagIds: [] })],
+  ));
+  const incoming = normalizeWorkspace(workspace(
+    [{ id: "in-prod", name: "PROD", color: "#175cd3" }],
+    [tenant("t1", "CORP-1", { tagIds: ["in-prod"] })],
+  ));
+  const merged = mergeBackup(local, incoming);
+  assert.deepEqual(merged.tags.map((item) => item.name), ["prod"], "同名标签只保留一条（本地）");
+  assert.equal(merged.tags[0].color, "#d92d20");
+  assert.deepEqual(merged.tenants[0].tagIds, ["local-prod"], "导入标签的引用应映射到本地同名标签");
+});
+
+test("合并时记录 ID 撞车不会把导入标签错配到本地标签", () => {
+  const local = normalizeWorkspace(workspace(
+    [{ id: "shared", name: "生产", color: "#d92d20" }],
+    [tenant("t1", "CORP-1", { tagIds: ["shared"] })],
+  ));
+  const incoming = normalizeWorkspace(workspace(
+    [{ id: "shared", name: "测试", color: "#b54708" }],
+    [tenant("t2", "CORP-2", { tagIds: ["shared"] })],
+  ));
+  const merged = mergeBackup(local, incoming);
+  assert.deepEqual(merged.tags.map((item) => item.name), ["生产", "测试"], "两条不同名称的标签都要保留");
+  assert.equal(new Set(merged.tags.map((item) => item.id)).size, 2, "记录 ID 必须唯一");
+  const imported = merged.tenants.find((item) => item.corporationId === "CORP-2");
+  const resolved = imported.tagIds.map((id) => merged.tags.find((tag) => tag.id === id).name);
+  assert.deepEqual(resolved, ["测试"], "导入租户仍指向「测试」，而不是本地「生产」");
+});
+
+test("合并标签库时同名判定与库、导入保持一致（忽略首尾空格与大小写）", () => {
+  const local = normalizeWorkspace(workspace(
+    [{ id: "a", name: " Prod ", color: "#d92d20" }],
+    [tenant("t1", "CORP-1", { tagIds: [] })],
+  ));
+  const incoming = normalizeWorkspace(workspace(
+    [{ id: "b", name: "prod", color: "#175cd3" }],
+    [tenant("t1", "CORP-1", { tagIds: ["b"] })],
+  ));
+  const merged = mergeBackup(local, incoming);
+  assert.equal(merged.tags.length, 1);
+  assert.deepEqual(merged.tenants[0].tagIds, ["a"]);
+});

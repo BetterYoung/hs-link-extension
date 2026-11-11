@@ -33,8 +33,18 @@ function trimmed(value) {
   return String(value ?? "").trim();
 }
 
-function sameName(left, right) {
-  return trimmed(left).toLocaleLowerCase() === trimmed(right).toLocaleLowerCase();
+/**
+ * 标签名称的唯一性口径：忽略首尾空格与大小写。
+ * 库内去重、创建、改名、Excel 导入与备份合并必须用同一个口径，
+ * 否则会出现"库里只有一个标签、租户引用却被丢弃"的错配。
+ */
+export function tagNameKey(value) {
+  // 用 toLowerCase 而不是 toLocaleLowerCase：标签身份不能随系统语言变化（如土耳其语的 I/i）。
+  return trimmed(value).toLowerCase();
+}
+
+export function sameTagName(left, right) {
+  return tagNameKey(left) === tagNameKey(right);
 }
 
 /** 校验并规整单个标签；颜色不在调色板内时回落默认灰。 */
@@ -59,7 +69,7 @@ export function normalizeTagList(input) {
   for (const entry of input) {
     const tag = normalizeTag(entry);
     if (list.some((item) => item.id === tag.id)) continue;
-    if (list.some((item) => sameName(item.name, tag.name))) continue;
+    if (list.some((item) => sameTagName(item.name, tag.name))) continue;
     list.push(tag);
   }
   return list;
@@ -70,7 +80,7 @@ export function createTag(list, { name, color }, { makeId = () => crypto.randomU
   const tags = normalizeTagList(list);
   if (tags.length >= TAG_LIMIT) throw new Error(`标签最多 ${TAG_LIMIT} 个，请先删除不再使用的标签`);
   const candidate = normalizeTag({ id: makeId(), name, color: color ?? DEFAULT_TAG_COLOR });
-  if (tags.some((item) => sameName(item.name, candidate.name))) {
+  if (tags.some((item) => sameTagName(item.name, candidate.name))) {
     throw new Error(`标签「${candidate.name}」已存在`);
   }
   return { tags: [...tags, candidate], tag: candidate };
@@ -83,7 +93,7 @@ export function updateTag(list, id, patch) {
   if (index < 0) throw new Error("标签不存在，可能已被删除");
   const current = tags[index];
   const next = normalizeTag({ ...current, ...patch, id: current.id });
-  if (tags.some((item) => item.id !== id && sameName(item.name, next.name))) {
+  if (tags.some((item) => item.id !== id && sameTagName(item.name, next.name))) {
     throw new Error(`标签「${next.name}」已存在`);
   }
   return tags.map((item) => (item.id === id ? next : item));
@@ -101,7 +111,7 @@ export function resolveTagIds(list, names) {
   for (const raw of names || []) {
     const name = trimmed(raw);
     if (!name) continue;
-    const found = tags.find((item) => sameName(item.name, name));
+    const found = tags.find((item) => sameTagName(item.name, name));
     if (!found) throw new Error(`标签「${name}」不存在，请先在标签管理中创建`);
     if (!ids.includes(found.id)) ids.push(found.id);
   }

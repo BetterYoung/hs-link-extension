@@ -1,6 +1,6 @@
 export const STORAGE_KEY = "access-link-workspace-v1";
 import { BACKUP_FORMAT_ID, isKnownBackupFormat, LEGACY_SAAS_ORIGIN, SAAS_ORIGIN } from "./config.js";
-import { normalizeTagList } from "./tags.js";
+import { normalizeTagList, sameTagName } from "./tags.js";
 
 export const BACKUP_FORMAT = BACKUP_FORMAT_ID;
 export const SCHEMA_VERSION = 1;
@@ -164,7 +164,7 @@ export function parseBackup(json) {
 }
 
 // 合并只补充资料；无法可靠判定身份时停止，避免静默覆盖。
-export function mergeBackup(current, backup) {
+export function mergeBackup(current, backup, { makeTagId = () => crypto.randomUUID() } = {}) {
   const local = normalizeWorkspace(current);
   const incoming = normalizeWorkspace(backup);
   const assertUniqueCorporations = (tenants) => {
@@ -174,16 +174,29 @@ export function mergeBackup(current, backup) {
   };
   assertUniqueCorporations(local.tenants);
   assertUniqueCorporations(incoming.tenants);
-  // 标签库按名称求并集，同名保留本地颜色；导入方 id 映射到合并后的 id。
+  // 标签库按名称求并集，同名（忽略大小写与首尾空格）保留本地颜色；导入方 id 映射到合并后的 id。
   const tags = [...local.tags];
+  const usedTagIds = new Set(tags.map((tag) => tag.id));
   const tagIdMap = new Map();
   for (const tag of incoming.tags) {
-    const existing = tags.find((item) => item.name === tag.name);
-    if (existing) tagIdMap.set(tag.id, existing.id);
-    else {
-      tags.push(tag);
-      tagIdMap.set(tag.id, tag.id);
+    const existing = tags.find((item) => sameTagName(item.name, tag.name));
+    if (existing) {
+      tagIdMap.set(tag.id, existing.id);
+      continue;
     }
+    // 名称不同但记录 ID 撞车：给导入的标签换一个新 ID，否则租户引用会指向本地另一个标签。
+    let id = tag.id;
+    if (usedTagIds.has(id)) {
+      let attempt = 0;
+      do {
+        id = makeTagId();
+        attempt += 1;
+      } while (usedTagIds.has(id) && attempt < 10);
+      if (usedTagIds.has(id)) throw new Error("标签记录 ID 冲突，无法安全合并");
+    }
+    usedTagIds.add(id);
+    tagIdMap.set(tag.id, id);
+    tags.push(id === tag.id ? tag : { ...tag, id });
   }
   const mergeTagIds = (target, source) => {
     const ids = [...(target || [])];
